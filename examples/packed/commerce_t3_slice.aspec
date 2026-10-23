@@ -1,0 +1,24 @@
+@spec 0.1
+@meta app: "commerce-engine" | arch: "event-driven" | runtime: "py311"
+
+# RATIONALES & INVARIANTS
+!why store: "PostgreSQL chosen for ACID compliance on order ledger"
+!why cache: "Redis key-expiration handles cart session eviction automatically"
+!rule payment: "Idempotency-Key header mandatory on all transaction mutations"
+!rule security: "PCI compliance: raw card data never touches internal microservices"
+!invariant currency: "Monetary values strictly stored as integer cents"
+
+# TYPES & CONTRACTS
+!type Money = { cents: int, curr: "USD" | "EUR" | "GBP" }
+!type CartItem = { sku: str, qty: int, price: Money }
+!type Order = { id: str, user_id: str, items: CartItem[], total: Money, status: str }
+
+!svc CartService:
+  addItem(cart_id: str, item: CartItem) -> bool
+  checkout(cart_id: str, idempotency_key: str) -> Order | Err(409)
+
+# TASK EXECUTION DAG
+[x] T1: initialize postgres schema and migrations
+[x] T2: implement CartItem and Money domain primitives [after: T1]
+[>] T3: develop CartService with Redis session persistence [after: T2]
+

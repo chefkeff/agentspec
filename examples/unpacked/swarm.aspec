@@ -1,0 +1,26 @@
+@spec 0.3
+@meta app: "cloud-commerce" | stack: "fastapi+postgres+redis"
+
+# 1. CONTRACTS & INTERFACES
+!type Money = { cents: int, curr: "USD" | "EUR" }
+!type CartItem = { item_id: str, qty: int, price: Money }
+!type Order = { order_id: str, items: CartItem[], total: Money }
+!type UserProfile = { user_id: str, email: str }
+
+!svc CartService:
+  addItem(cart_id: str, item: CartItem) -> bool
+  checkout(cart_id: str) -> Order
+
+!svc UserService:
+  getProfile(user_id: str) -> UserProfile
+
+# 2. INVARIANTS
+!rule sec: "Never persist raw card credentials; PCI compliant"
+!invariant currency: "Monetary amounts strictly stored as integer cents"
+
+# 3. TASK EXECUTION DAG
+[x] T1: initialize project schema & migrations [touch: migrations/001.sql]
+[ ] T2: implement CartService checkout [after: T1] [ref: CartService, Order] [touch: src/cart.py, tests/test_cart.py] [test: echo cart_tests_passed]
+[ ] T3: implement UserService profile [after: T1] [ref: UserService] [touch: src/user.py, tests/test_user.py] [test: echo user_tests_passed]
+[ ] T4: cart performance telemetry [after: T1] [ref: CartService] [touch: src/cart.py]
+[ ] T5: end-to-end checkout saga [after: T2, T3] [ref: CartService, UserService] [touch: src/saga.py]

@@ -1,0 +1,17 @@
+@spec 0.3
+@meta app: "cloud-commerce" | stack: "fastapi+postgres+redis"
+
+# RATIONALES & INVARIANTS
+!rule sec: "Never persist raw card credentials; PCI compliant"
+!invariant currency: "Monetary amounts strictly stored as integer cents"
+
+# TYPES & CONTRACTS
+!type UserProfile = { user_id: str, email: str }
+
+!svc UserService:
+  getProfile(user_id: str) -> UserProfile
+
+# TASK EXECUTION DAG
+[x] T1: initialize project schema & migrations [touch: migrations/001.sql]
+[>] T3: implement UserService profile [after: T1] [ref: UserService] [touch: src/user.py, tests/test_user.py] [test: echo user_tests_passed]
+
