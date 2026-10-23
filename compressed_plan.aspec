@@ -1,0 +1,13 @@
+@spec 0.1
+@meta app: "verbose_plan" | source: "compressed-from-md"
+
+# RATIONALES & INVARIANTS
+!rule req_1: "All incoming requests must have an Authorization header present."
+!rule req_2: "Raw passwords are never logged under any circumstances."
+!rule req_3: "Security constraint: PCI compliance is strictly required for billing endpoints."
+
+# TASK EXECUTION DAG
+[ ] T1: Initialize the project repository with FastAPI and PostgreSQL
+[ ] T2: Implement user authentication controller with bcrypt password hashing [after: T1]
+[ ] T3: Connect Redis cache for user session persistence [after: T2]
+[ ] T4: Build end-to-end integration test suite [after: T3]

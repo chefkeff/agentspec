@@ -1,0 +1,41 @@
+@spec 0.1
+@meta app: "agentspec" | origin: "auto-ingest"
+
+# TYPES & CONTRACTS
+!type MethodDef = {name: str, signature: str}
+!type ServiceDef = {name: str, methods: List[MethodDef]}
+!type TypeDef = {name: str, definition: str}
+!type InvariantDef = {kind: str, key: str, content: str}
+!type TaskDef = {id: str, status: TaskStatus, title: str, dependencies: List[str]}
+!type SpecDoc = {version: str, meta: Dict[str, str], types: List[TypeDef], services: List[ServiceDef], invariants: List[InvariantDef], tasks: List[TaskDef]}
+!type LintIssue = {severity: str, code: str, message: str}
+
+!svc BenchmarkResult:
+  __init__(aspec_tokens: int, markdown_tokens: int, encoding_name: str) -> any
+
+!svc ParseError:
+  __init__(message: str, line_num: int, line: str) -> any
+
+!svc Parser:
+  __init__(content: str) -> any
+  parse() -> SpecDoc
+
+!svc Transpiler:
+  __init__(doc: SpecDoc) -> any
+  to_markdown() -> str
+
+!svc Linter:
+  __init__(doc: SpecDoc) -> any
+  lint() -> List[LintIssue]
+
+!svc CodebaseIngester:
+  __init__(target_path: Path) -> any
+  ingest() -> SpecDoc
+
+# TASK EXECUTION DAG
+[ ] T1: test and harden BenchmarkResult implementation
+[ ] T2: test and harden ParseError implementation [after: T1]
+[ ] T3: test and harden Parser implementation [after: T2]
+[ ] T4: test and harden Transpiler implementation [after: T3]
+[ ] T5: test and harden Linter implementation [after: T4]
+[ ] T6: test and harden CodebaseIngester implementation [after: T5]
