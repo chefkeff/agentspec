@@ -182,3 +182,7 @@ cython_debug/
 
 # agentspec patch locks
 *.aspec.lock
+
+# A/B eval: venv and per-run working dirs
+eval/.venv/
+eval/runs/

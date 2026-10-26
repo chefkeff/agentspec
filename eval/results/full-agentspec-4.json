@@ -1,0 +1,67 @@
+{
+  "condition": "agentspec",
+  "run": "full-agentspec-4",
+  "wall_seconds": 137.2,
+  "timed_out": [],
+  "cost_usd": 0.891,
+  "turns": 71,
+  "input_tokens": 1665633,
+  "output_tokens": 13852,
+  "hidden_tests_passed": 31,
+  "hidden_tests_total": 31,
+  "tasks_passing": [
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7",
+    "T8"
+  ],
+  "all_tasks_pass": true,
+  "marked_done": [
+    "T2",
+    "T3",
+    "T4",
+    "T5",
+    "T6",
+    "T7",
+    "T8"
+  ],
+  "false_done": [],
+  "src_files_edited_by_multiple_agents": {},
+  "test_files_edited": [],
+  "state_file_hand_edits": [],
+  "permission_denials": 0,
+  "agent_errors": [],
+  "hidden_per_task": {
+    "T2": {
+      "passed": 6,
+      "total": 6
+    },
+    "T3": {
+      "passed": 6,
+      "total": 6
+    },
+    "T4": {
+      "passed": 4,
+      "total": 4
+    },
+    "T5": {
+      "passed": 5,
+      "total": 5
+    },
+    "T6": {
+      "passed": 5,
+      "total": 5
+    },
+    "T7": {
+      "passed": 2,
+      "total": 2
+    },
+    "T8": {
+      "passed": 3,
+      "total": 3
+    }
+  }
+}
