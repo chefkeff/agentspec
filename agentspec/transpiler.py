@@ -75,7 +75,14 @@ class Transpiler:
                     status_text = "*(Pending)*"
 
                 dep_str = f" `after: {', '.join(t.dependencies)}`" if t.dependencies else ""
-                lines.append(f"- {mark} **{t.id}**: {t.title} {status_text}{dep_str}")
+                owner_str = f" — claimed by `{t.owner}`" if t.owner else ""
+                lines.append(f"- {mark} **{t.id}**: {t.title} {status_text}{dep_str}{owner_str}")
+                if t.refs:
+                    lines.append(f"  - Uses: {', '.join(f'`{r}`' for r in t.refs)}")
+                if t.touches:
+                    lines.append(f"  - Files: {', '.join(f'`{f}`' for f in t.touches)}")
+                if t.test_cmd:
+                    lines.append(f"  - Test: `{t.test_cmd}`")
 
             lines.append("")
 
