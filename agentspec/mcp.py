@@ -7,7 +7,7 @@ from typing import Dict, Any
 from .parser import parse_spec
 from .transpiler import to_markdown
 from .packer import format_subagent_prompt
-from .patcher import patch_file
+from .patcher import patch_file, PatchError
 from .linter import lint_spec
 from .scheduler import get_task_schedule
 
@@ -34,7 +34,7 @@ TOOLS = [
                 "mutations": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of mutations, e.g. ['T2=done', '+task T5: title [after: T4]']"
+                    "description": "List of mutations, e.g. ['T2=in_progress@agent-a', 'T2=done', '+task T5: title [after: T4]']. Claims are rejected if the task is not ready, already claimed, or its [touch: ...] files are held by another in-progress task"
                 },
                 "verify": {"type": "boolean", "description": "Run [test: ...] verification gate before marking task done"}
             },
@@ -101,13 +101,17 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
     elif name == "aspec_patch":
         muts = args.get("mutations", [])
         verify = args.get("verify", False)
-        updated = patch_file(fpath, muts, verify=verify)
+        try:
+            updated = patch_file(fpath, muts, verify=verify)
+        except PatchError as pe:
+            return f"Patch rejected: {pe}"
         return f"Successfully applied {len(muts)} mutations. Active tasks: {len(updated.tasks)}"
     elif name == "aspec_ready":
         schedule = get_task_schedule(doc)
         data = {
             "ready_tasks": [{"id": t.id, "title": t.title, "touches": t.touches, "test": t.test_cmd} for t in schedule.ready_tasks],
-            "in_progress": [{"id": t.id, "title": t.title} for t in schedule.in_progress_tasks],
+            "in_progress": [{"id": t.id, "title": t.title, "owner": t.owner} for t in schedule.in_progress_tasks],
+            "waiting_on_locks": [{"id": t.id, "held_by": schedule.lock_holders[t.id]} for t in schedule.lock_waiting_tasks],
             "blocked": [{"id": t.id, "title": t.title} for t in schedule.blocked_tasks],
             "parallel_batches": [
                 {

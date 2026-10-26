@@ -1,5 +1,5 @@
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from .models import SpecDoc, TypeDef, ServiceDef, MethodDef, InvariantDef, TaskDef, TaskStatus
 
 class ParseError(Exception):
@@ -7,6 +7,27 @@ class ParseError(Exception):
         super().__init__(f"Line {line_num}: {message} -> '{line}'")
         self.line_num = line_num
         self.line = line
+
+TAG_PATTERN = r"\[(after|ref|touch|test|by):\s*([^\]]+)\]"
+
+def parse_task_tags(rest: str) -> Tuple[str, Dict[str, Any]]:
+    """Split a task line remainder into its title and TaskDef keyword fields."""
+    tags: Dict[str, Any] = {}
+    for tag_match in re.finditer(TAG_PATTERN, rest):
+        tag_type, tag_val = tag_match.group(1), tag_match.group(2).strip()
+        if tag_type == "after":
+            tags["dependencies"] = [d.strip() for d in tag_val.split(",") if d.strip()]
+        elif tag_type == "ref":
+            tags["refs"] = [r.strip() for r in tag_val.split(",") if r.strip()]
+        elif tag_type == "touch":
+            tags["touches"] = [t.strip() for t in tag_val.split(",") if t.strip()]
+        elif tag_type == "test":
+            tags["test_cmd"] = tag_val
+        elif tag_type == "by":
+            tags["owner"] = tag_val
+
+    title = re.sub(TAG_PATTERN, "", rest).strip()
+    return title, tags
 
 class Parser:
     def __init__(self, content: str):
@@ -103,35 +124,9 @@ class Parser:
                 elif status_char == ">":
                     status = TaskStatus.IN_PROGRESS
 
-                deps: List[str] = []
-                refs: List[str] = []
-                touches: List[str] = []
-                test_cmd: Optional[str] = None
+                title, tags = parse_task_tags(rest)
 
-                # Extract [after: ...], [ref: ...], [touch: ...], [test: ...]
-                for tag_match in re.finditer(r"\[(after|ref|touch|test):\s*([^\]]+)\]", rest):
-                    tag_type, tag_val = tag_match.group(1), tag_match.group(2).strip()
-                    if tag_type == "after":
-                        deps = [d.strip() for d in tag_val.split(",") if d.strip()]
-                    elif tag_type == "ref":
-                        refs = [r.strip() for r in tag_val.split(",") if r.strip()]
-                    elif tag_type == "touch":
-                        touches = [t.strip() for t in tag_val.split(",") if t.strip()]
-                    elif tag_type == "test":
-                        test_cmd = tag_val
-
-                # Remove all matched tags from title
-                title = re.sub(r"\[(after|ref|touch|test):\s*[^\]]+\]", "", rest).strip()
-
-                doc.tasks.append(TaskDef(
-                    id=task_id.strip(),
-                    status=status,
-                    title=title,
-                    dependencies=deps,
-                    refs=refs,
-                    touches=touches,
-                    test_cmd=test_cmd
-                ))
+                doc.tasks.append(TaskDef(id=task_id.strip(), status=status, title=title, **tags))
                 continue
 
             raise ParseError("Unrecognized syntax or command", idx, raw_line)

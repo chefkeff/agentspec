@@ -16,6 +16,21 @@ class TaskSchedule:
     completed_tasks: List[TaskDef]
     parallel_batches: List[ParallelBatch]
     file_conflicts: Dict[str, List[str]]  # filename -> list of task_ids contending for it
+    lock_waiting_tasks: List[TaskDef] = field(default_factory=list)  # deps done, but files held by in-progress tasks
+    lock_holders: Dict[str, List[str]] = field(default_factory=dict)  # waiting task_id -> in-progress task_ids blocking it
+
+def tasks_conflict(a: TaskDef, b: TaskDef) -> bool:
+    """
+    Two tasks conflict if their [touch: ...] file locks overlap. A task without
+    [touch: ...] has an undeclared scope, so it conflicts with every other task.
+    """
+    if not a.touches or not b.touches:
+        return True
+    return bool(set(a.touches) & set(b.touches))
+
+def conflicting_holders(task: TaskDef, in_progress: List[TaskDef]) -> List[str]:
+    """Return IDs of in-progress tasks whose file locks block `task`."""
+    return [h.id for h in in_progress if h.id != task.id and tasks_conflict(task, h)]
 
 def get_task_schedule(doc: SpecDoc) -> TaskSchedule:
     """
@@ -28,13 +43,20 @@ def get_task_schedule(doc: SpecDoc) -> TaskSchedule:
 
     ready_tasks: List[TaskDef] = []
     blocked_tasks: List[TaskDef] = []
+    lock_waiting_tasks: List[TaskDef] = []
+    lock_holders: Dict[str, List[str]] = {}
 
     for t in doc.tasks:
         if t.status == TaskStatus.TODO:
-            if all(dep in completed_ids for dep in t.dependencies):
-                ready_tasks.append(t)
-            else:
+            if not all(dep in completed_ids for dep in t.dependencies):
                 blocked_tasks.append(t)
+                continue
+            holders = conflicting_holders(t, in_progress_tasks)
+            if holders:
+                lock_waiting_tasks.append(t)
+                lock_holders[t.id] = holders
+            else:
+                ready_tasks.append(t)
 
     # Detect file contention among all ready tasks
     file_to_tasks: Dict[str, List[str]] = {}
@@ -55,17 +77,12 @@ def get_task_schedule(doc: SpecDoc) -> TaskSchedule:
 
         unpicked = []
         for t in remaining:
-            task_touches = set(t.touches)
-            # If task modifies files already claimed by this batch, defer to next batch
-            if task_touches and (task_touches & batch_touched):
+            # If task conflicts with anything already in this batch, defer to next batch
+            if any(tasks_conflict(t, other) for other in current_batch_tasks):
                 unpicked.append(t)
             else:
                 current_batch_tasks.append(t)
-                batch_touched |= task_touches
-
-        if not current_batch_tasks:
-            # Fallback in case of degenerate condition
-            current_batch_tasks = [unpicked.pop(0)]
+                batch_touched |= set(t.touches)
 
         parallel_batches.append(ParallelBatch(
             batch_index=batch_idx,
@@ -81,5 +98,7 @@ def get_task_schedule(doc: SpecDoc) -> TaskSchedule:
         blocked_tasks=blocked_tasks,
         completed_tasks=completed_tasks,
         parallel_batches=parallel_batches,
-        file_conflicts=file_conflicts
+        file_conflicts=file_conflicts,
+        lock_waiting_tasks=lock_waiting_tasks,
+        lock_holders=lock_holders
     )

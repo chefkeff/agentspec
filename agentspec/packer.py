@@ -91,7 +91,8 @@ def pack_for_task(doc: SpecDoc, target_id: str, set_target_in_progress: bool = T
                 dependencies=list(t.dependencies),
                 refs=list(t.refs),
                 touches=list(t.touches),
-                test_cmd=t.test_cmd
+                test_cmd=t.test_cmd,
+                owner=t.owner
             ))
 
     if prune_contracts:

@@ -329,7 +329,11 @@ def cmd_ready(args):
                     {"id": t.id, "title": t.title, "touches": t.touches, "refs": t.refs, "test": t.test_cmd}
                     for t in schedule.ready_tasks
                 ],
-                "in_progress": [{"id": t.id, "title": t.title} for t in schedule.in_progress_tasks],
+                "in_progress": [{"id": t.id, "title": t.title, "owner": t.owner} for t in schedule.in_progress_tasks],
+                "waiting_on_locks": [
+                    {"id": t.id, "title": t.title, "held_by": schedule.lock_holders[t.id]}
+                    for t in schedule.lock_waiting_tasks
+                ],
                 "blocked_tasks": [
                     {"id": t.id, "title": t.title, "missing_deps": [d for d in t.dependencies if d not in {x.id for x in schedule.completed_tasks}]}
                     for t in schedule.blocked_tasks
@@ -348,12 +352,18 @@ def cmd_ready(args):
             return
 
         console.print(f"\n[bold cyan]🚀 Multi-Agent Swarm Dispatcher:[/bold cyan] {filepath.name}")
-        console.print(f"Completed: [green]{len(schedule.completed_tasks)}[/green] | In Progress: [yellow]{len(schedule.in_progress_tasks)}[/yellow] | Ready: [bold green]{len(schedule.ready_tasks)}[/bold green] | Blocked: [dim]{len(schedule.blocked_tasks)}[/dim]\n")
+        console.print(f"Completed: [green]{len(schedule.completed_tasks)}[/green] | In Progress: [yellow]{len(schedule.in_progress_tasks)}[/yellow] | Ready: [bold green]{len(schedule.ready_tasks)}[/bold green] | Waiting on locks: [yellow]{len(schedule.lock_waiting_tasks)}[/yellow] | Blocked: [dim]{len(schedule.blocked_tasks)}[/dim]\n")
 
         if schedule.file_conflicts:
             console.print("[bold red]⚠ File Contention Detected:[/bold red]")
             for f, tids in schedule.file_conflicts.items():
                 console.print(f"  • File '[bold]{f}[/bold]' contended by tasks: [yellow]{', '.join(tids)}[/yellow] (isolated into separate execution tiers)")
+            console.print("")
+
+        if schedule.lock_waiting_tasks:
+            console.print("[bold yellow]🔒 Waiting on file locks held by in-progress tasks:[/bold yellow]")
+            for t in schedule.lock_waiting_tasks:
+                console.print(f"  • {t.id} waits for: [yellow]{', '.join(schedule.lock_holders[t.id])}[/yellow]")
             console.print("")
 
         if not schedule.ready_tasks:
@@ -375,7 +385,7 @@ def cmd_ready(args):
         for b in schedule.parallel_batches:
             for i, t in enumerate(b.tasks):
                 tier_str = f"Batch {b.batch_index}" if i == 0 else ""
-                touches_str = ", ".join(t.touches) if t.touches else "[dim]unrestricted[/dim]"
+                touches_str = ", ".join(t.touches) if t.touches else "[dim]undeclared (exclusive)[/dim]"
                 test_str = "[cyan]configured[/cyan]" if t.test_cmd else "[dim]none[/dim]"
                 table.add_row(tier_str, t.id, t.title, touches_str, test_str)
 

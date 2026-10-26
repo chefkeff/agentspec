@@ -37,6 +37,7 @@ class TaskDef:
     refs: List[str] = field(default_factory=list)
     touches: List[str] = field(default_factory=list)
     test_cmd: Optional[str] = None
+    owner: Optional[str] = None  # agent that claimed the task ([by: ...])
 
 @dataclass
 class SpecDoc:
@@ -124,6 +125,8 @@ class SpecDoc:
                     tags.append(f"[touch: {', '.join(t.touches)}]")
                 if t.test_cmd:
                     tags.append(f"[test: {t.test_cmd}]")
+                if t.owner:
+                    tags.append(f"[by: {t.owner}]")
                 tag_str = f" {' '.join(tags)}" if tags else ""
                 lines.append(f"[{mark}] {t.id}: {t.title}{tag_str}")
 
