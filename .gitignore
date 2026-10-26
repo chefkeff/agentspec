@@ -180,8 +180,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
-# agentspec patch locks
+# agentspec patch locks and claim snapshots
 *.aspec.lock
+*.aspec.claims/
 
 # A/B eval: venv and per-run working dirs
 eval/.venv/

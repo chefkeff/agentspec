@@ -2,12 +2,15 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Dict, Optional, Tuple
 from .models import SpecDoc, TaskDef, TaskStatus, InvariantDef
 from .parser import parse_spec, parse_task_tags
-from .scheduler import conflicting_holders
+from .scheduler import conflicting_holders, get_task_schedule
+from . import scope
 
 try:
     import fcntl
@@ -39,15 +42,31 @@ def _run_gate(task: TaskDef) -> None:
         err_msg = res.stderr.strip() or res.stdout.strip()
         raise PatchError(f"Verification test failed for task '{task.id}': {err_msg}")
 
-def verify_mutations(doc: SpecDoc, mutations: List[str]) -> None:
-    """Run the [test: ...] gate of every task the mutations would mark done."""
+def _check_scope(spec_path: Path, doc: SpecDoc, task: TaskDef) -> None:
+    outside = scope.scope_violations(spec_path, doc, task)
+    if outside:
+        raise PatchError(
+            f"Task '{task.id}' changed files outside its [touch: ...] list: {', '.join(outside)}. "
+            "Revert those changes, or add the files to the task's [touch: ...] list."
+        )
+
+def verify_mutations(doc: SpecDoc, mutations: List[str], spec_path: Optional[Path] = None) -> None:
+    """
+    For every task the mutations would mark done: check that it only changed its
+    [touch: ...] files since it was claimed (when spec_path is given and a claim
+    snapshot exists), then run its [test: ...] gate.
+    """
     task_map = {t.id: t for t in doc.tasks}
     for mut in mutations:
         mut = mut.strip()
         if "=" in mut and not mut.startswith("+"):
             task_id, status, _ = _parse_status_mutation(mut)
             task = task_map.get(task_id)
-            if status == TaskStatus.DONE and task and task.test_cmd:
+            if status != TaskStatus.DONE or not task:
+                continue
+            if spec_path is not None:
+                _check_scope(spec_path, doc, task)
+            if task.test_cmd:
                 _run_gate(task)
 
 def _check_prerequisites(task: TaskDef, task_map: Dict[str, TaskDef], action: str) -> None:
@@ -182,14 +201,66 @@ def _atomic_write(filepath: Path, content: str) -> None:
             os.unlink(tmp_name)
         raise
 
+def _sync_snapshots(filepath: Path, doc: SpecDoc, mutations: List[str]) -> None:
+    """Record a file snapshot for newly claimed tasks; drop it for finished or released ones."""
+    for mut in mutations:
+        mut = mut.strip()
+        if "=" not in mut or mut.startswith("+"):
+            continue
+        task_id, status, owner = _parse_status_mutation(mut)
+        if status == TaskStatus.IN_PROGRESS:
+            if not scope.snapshot_path(filepath, task_id).exists():
+                scope.take_snapshot(filepath, doc, task_id, owner)
+        else:
+            scope.drop_snapshot(filepath, task_id)
+
 def patch_file(filepath: Path, mutations: List[str], verify: bool = False) -> SpecDoc:
     if verify:
-        # Run (possibly slow) test gates before taking the lock so other agents aren't blocked.
-        verify_mutations(parse_spec(filepath.read_text(encoding="utf-8")), mutations)
+        # Run (possibly slow) checks before taking the lock so other agents aren't blocked.
+        verify_mutations(parse_spec(filepath.read_text(encoding="utf-8")), mutations, spec_path=filepath)
 
     with spec_lock(filepath):
         # Re-read under the lock: another agent may have patched the file meanwhile.
         doc = parse_spec(filepath.read_text(encoding="utf-8"))
         updated_doc = apply_mutations(doc, mutations)
         _atomic_write(filepath, updated_doc.to_aspec())
+        _sync_snapshots(filepath, updated_doc, mutations)
     return updated_doc
+
+@dataclass
+class NextResult:
+    status: str  # 'claimed', 'resumed', 'all_done' or 'none_ready'
+    task: Optional[TaskDef]
+    doc: SpecDoc
+
+def claim_next(filepath: Path, owner: str, wait: bool = False, timeout: float = 90.0,
+               poll_interval: float = 3.0) -> NextResult:
+    """
+    Atomically find and claim the next ready task for `owner`.
+
+    If `owner` already holds an in-progress task, that task is returned instead
+    ('resumed'), so an agent never holds two tasks. With `wait`, keeps polling
+    until a task becomes ready, every task is done, or `timeout` seconds pass.
+    """
+    if not owner:
+        raise PatchError("An owner name is required to claim a task.")
+    deadline = time.monotonic() + timeout
+    while True:
+        with spec_lock(filepath):
+            doc = parse_spec(filepath.read_text(encoding="utf-8"))
+            held = next((t for t in doc.tasks if t.status == TaskStatus.IN_PROGRESS and t.owner == owner), None)
+            if held:
+                return NextResult("resumed", held, doc)
+            if all(t.status == TaskStatus.DONE for t in doc.tasks):
+                return NextResult("all_done", None, doc)
+            schedule = get_task_schedule(doc)
+            if schedule.ready_tasks:
+                task = schedule.ready_tasks[0]
+                updated = apply_mutations(doc, [f"{task.id}=in_progress@{owner}"])
+                _atomic_write(filepath, updated.to_aspec())
+                _sync_snapshots(filepath, updated, [f"{task.id}=in_progress@{owner}"])
+                claimed = next(t for t in updated.tasks if t.id == task.id)
+                return NextResult("claimed", claimed, updated)
+        if not wait or time.monotonic() >= deadline:
+            return NextResult("none_ready", None, doc)
+        time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))

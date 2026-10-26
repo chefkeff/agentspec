@@ -8,7 +8,7 @@ from .parser import parse_spec, ParseError
 from .transpiler import to_markdown
 from .benchmark import benchmark_spec, count_tokens
 from .packer import pack_for_task, format_subagent_prompt
-from .patcher import apply_mutations, patch_file, PatchError
+from .patcher import apply_mutations, patch_file, claim_next, NextResult, PatchError
 from .linter import lint_spec, LintIssue
 from .ingester import ingest_codebase
 from .dashboard import generate_html_dashboard
@@ -33,6 +33,8 @@ __all__ = [
     "format_subagent_prompt",
     "apply_mutations",
     "patch_file",
+    "claim_next",
+    "NextResult",
     "PatchError",
     "lint_spec",
     "LintIssue",

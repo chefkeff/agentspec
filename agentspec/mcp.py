@@ -6,12 +6,26 @@ from typing import Dict, Any
 
 from .parser import parse_spec
 from .transpiler import to_markdown
-from .packer import format_subagent_prompt
-from .patcher import patch_file, PatchError
+from .packer import format_subagent_prompt, format_next_message
+from .patcher import patch_file, claim_next, PatchError
 from .linter import lint_spec
 from .scheduler import get_task_schedule
 
 TOOLS = [
+    {
+        "name": "aspec_next",
+        "description": "Atomically claim the next ready task for an agent (or return the task it already holds) and get its scoped prompt. Optionally waits until a task becomes ready.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to the .aspec file"},
+                "owner": {"type": "string", "description": "Agent name recorded as the task owner"},
+                "wait": {"type": "boolean", "description": "Keep polling until a task is ready or all tasks are done"},
+                "timeout": {"type": "number", "description": "Seconds to wait when wait is true (default 90)"}
+            },
+            "required": ["file_path", "owner"]
+        }
+    },
     {
         "name": "aspec_pack",
         "description": "Generate minimal token-efficient subagent context slice for a specific task",
@@ -36,7 +50,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "List of mutations, e.g. ['T2=in_progress@agent-a', 'T2=done', '+task T5: title [after: T4]']. Claims are rejected if the task is not ready, already claimed, or its [touch: ...] files are held by another in-progress task"
                 },
-                "verify": {"type": "boolean", "description": "Run [test: ...] verification gate before marking task done"}
+                "verify": {"type": "boolean", "description": "Before marking a task done, check it only changed its [touch: ...] files and run its [test: ...] gate"}
             },
             "required": ["file_path", "mutations"]
         }
@@ -96,7 +110,14 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
     content = fpath.read_text(encoding="utf-8")
     doc = parse_spec(content)
 
-    if name == "aspec_pack":
+    if name == "aspec_next":
+        try:
+            result = claim_next(fpath, args.get("owner", ""), wait=args.get("wait", False),
+                                timeout=float(args.get("timeout", 90)))
+        except PatchError as pe:
+            return f"Next rejected: {pe}"
+        return format_next_message(result, str(fpath))
+    elif name == "aspec_pack":
         return format_subagent_prompt(doc, args["task_id"])
     elif name == "aspec_patch":
         muts = args.get("mutations", [])

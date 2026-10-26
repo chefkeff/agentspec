@@ -30,68 +30,61 @@ An `.aspec` file defines three foundational layers:
 
 ## 2. The Standard Agent Execution Loop
 
-Whenever you are assigned to implement features or advance the project, follow this 5-step lifecycle:
+Whenever you are assigned to implement features or advance the project, follow this 4-step lifecycle, using a unique agent name (e.g. `agent-3`) throughout:
 
 ```
                   ┌──────────────────────┐
-                  │ 1. Find Ready Tasks  │  aspec ready <file> [--json]
+                  │ 1. Get Next Task     │  aspec next <file> --as <name> --wait
                   └──────────┬───────────┘
                              │
                              ▼
                   ┌──────────────────────┐
-                  │ 2. Claim & Lock Task │  aspec patch <file> --set T<id>=in_progress
+                  │ 2. Implement Feature │  Modify strictly within [touch: ...] files
                   └──────────┬───────────┘
                              │
                              ▼
                   ┌──────────────────────┐
-                  │ 3. Implement Feature │  Modify strictly within [touch: ...] files
+                  │ 3. Run Test Gate     │  aspec test <file> -t T<id>
                   └──────────┬───────────┘
                              │
                              ▼
                   ┌──────────────────────┐
-                  │ 4. Run Test Gate     │  aspec test <file> -t T<id>
+                  │ 4. Mark Complete     │  aspec patch <file> --set T<id>=done --verify
                   └──────────┬───────────┘
                              │
-                             ▼
-                  ┌──────────────────────┐
-                  │ 5. Mark Complete     │  aspec patch <file> --set T<id>=done --verify
-                  └──────────────────────┘
+                             └──▶ back to 1 until `next` reports all tasks are done
 ```
 
-### Step 1: Discover Unblocked Work
-Inspect the project DAG to see which tasks are ready for execution:
+### Step 1: Get Your Next Task
 ```bash
-aspec ready project.aspec
-# Or obtain structured JSON for orchestrator parsing:
-aspec ready project.aspec --json
+aspec next project.aspec --as <name> --wait
 ```
-* Select a task from **Batch 1**. Tasks in Batch 1 have all prerequisites satisfied and disjoint file locks, meaning they can be worked on concurrently without git merge collisions.
+* `next` finds a ready task, claims it for you atomically and prints its scoped prompt: the contracts, rules and prerequisite tasks you need, the files you may edit, and the command to finish it.
+* If you already hold a task, `next` gives you that task again rather than a new one.
+* If it reports that no task is ready yet, run it again. If it reports that all tasks are done, stop.
+* Orchestrators that assign work themselves can still use `aspec ready project.aspec --json` and claim with `aspec patch project.aspec --set T<id>=in_progress@<name>`.
 
-### Step 2: Claim the Task
-Before writing code, transition the task into progress to signal other agents and developers:
-```bash
-aspec patch project.aspec --set T<id>=in_progress
-```
-
-### Step 3: Implement Within Scope
-* **File Scoping**: Modify *only* the files declared in `[touch: ...]`.
+### Step 2: Implement Within Scope
+* **File Scoping**: Modify *only* the files declared in `[touch: ...]`. This is checked when you mark the task done.
 * **Contracts**: Adhere strictly to all signatures defined in `!svc` and `!type`. Do not invent new endpoint names or change return types unless you patch the spec first.
 * **Invariants**: Obey all `!rule` and `!invariant` declarations.
 
-### Step 4: Run Verification Gates
+### Step 3: Run Verification Gates
 If the task specifies a `[test: ...]` tag, run the verification gate:
 ```bash
 aspec test project.aspec -t T<id>
 ```
 Ensure all tests exit with status code `0`. If a test fails, debug and resolve the issue before proceeding.
 
-### Step 5: Mark the Task Done
+### Step 4: Mark the Task Done
 Mark the task as completed using the verification guard:
 ```bash
 aspec patch project.aspec --set T<id>=done --verify
 ```
-* If the verification gate passes, `agentspec` will update the status to `[x]`.
-* If the test fails, `agentspec` will reject the transition and output the failure logs.
+* `--verify` first checks that, since you claimed the task, no files outside its `[touch: ...]` list changed (other agents' task files excepted), then runs the test gate.
+* If both pass, `agentspec` updates the status to `[x]`.
+* If you changed files outside your scope, revert those changes and try again. If the test fails, `agentspec` rejects the transition and outputs the failure logs.
+* To give a task back without finishing it: `aspec patch project.aspec --set T<id>=todo`.
 
 ---
 
@@ -134,4 +127,4 @@ As software develops, you may discover missing tasks, dependencies, or architect
 
 1. **No Manual Rewrites**: Always use `aspec patch` or `agentspec.patcher` to mutate state. Never overwrite the `.aspec` file with an unparsed string.
 2. **Zero Invariant Deletion**: You are strictly forbidden from deleting or weakening `!rule` or `!invariant` entries without explicit, direct user instructions.
-3. **No Out-of-Order Execution**: Never mark a task `in_progress` or `done` if its prerequisites in `[after: ...]` are not `[x] done`.
+3. **No Out-of-Order Execution**: Never mark a task `in_progress` or `done` if its prerequisites in `[after: ...]` are not `[x] done`. (`aspec next` and `aspec patch` enforce this.)

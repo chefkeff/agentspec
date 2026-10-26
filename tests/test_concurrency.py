@@ -123,7 +123,7 @@ def test_patch_file_preserves_mode_and_leaves_no_temp_files(tmp_path: Path):
 
     assert spec_file.stat().st_mode & 0o777 == 0o640
     assert "[>] T2: auth [after: T1] [touch: src/auth.py] [by: agent-a]" in spec_file.read_text()
-    leftovers = {p.name for p in tmp_path.iterdir()} - {"project.aspec", "project.aspec.lock"}
+    leftovers = {p.name for p in tmp_path.iterdir()} - {"project.aspec", "project.aspec.lock", "project.aspec.claims"}
     assert leftovers == set()
 
 def test_failed_patch_leaves_file_untouched(tmp_path: Path):

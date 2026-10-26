@@ -127,3 +127,23 @@ def format_subagent_prompt(doc: SpecDoc, target_id: str, prune_contracts: bool =
         f"Instructions: Implement {target_task.id} adhering strictly to the above contracts and invariants."
     ]
     return "\n".join(prompt)
+
+def format_next_message(result, spec_name: str) -> str:
+    """Human/agent-readable outcome of `aspec next` (a patcher.NextResult)."""
+    if result.status == "all_done":
+        return "All tasks are done. Nothing left to claim."
+    if result.status == "none_ready":
+        in_progress = sum(t.status == TaskStatus.IN_PROGRESS for t in result.doc.tasks)
+        todo = sum(t.status == TaskStatus.TODO for t in result.doc.tasks)
+        return (f"No task is ready for you yet ({in_progress} in progress, {todo} waiting on prerequisites "
+                f"or file locks). Run the same command again to keep waiting.")
+    task = result.task
+    verb = "Claimed" if result.status == "claimed" else "You already hold"
+    return "\n".join([
+        f"{verb} {task.id} for {task.owner}.",
+        "",
+        format_subagent_prompt(result.doc, task.id),
+        "",
+        f"Edit only: {', '.join(task.touches) if task.touches else '(no [touch: ...] declared)'}",
+        f"When it is finished: aspec patch {spec_name} --set {task.id}=done --verify",
+    ])

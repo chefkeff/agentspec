@@ -4,12 +4,13 @@ from pathlib import Path
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
+from rich.markup import escape
 
 from .parser import parse_spec, ParseError
 from .transpiler import to_markdown
 from .benchmark import benchmark_spec, count_tokens
-from .packer import pack_for_task, format_subagent_prompt
-from .patcher import patch_file, PatchError
+from .packer import pack_for_task, format_subagent_prompt, format_next_message
+from .patcher import patch_file, claim_next, PatchError
 from .linter import lint_spec
 from .ingester import ingest_codebase
 from .dashboard import generate_html_dashboard
@@ -193,10 +194,36 @@ def cmd_patch(args):
         patch_file(filepath, mutations, verify=verify)
         console.print(f"[bold green]✔ Successfully patched '{filepath}':[/bold green]")
         for m in mutations:
-            console.print(f"  • Applied: [cyan]{m}[/cyan]")
+            console.print(f"  • Applied: [cyan]{escape(m)}[/cyan]")
     except PatchError as pe:
-        console.print(f"[bold red]Patch Error:[/bold red] {pe}")
+        console.print(f"[bold red]Patch Error:[/bold red] {escape(str(pe))}")
         sys.exit(1)
+
+def cmd_next(args):
+    filepath = Path(args.file)
+    if not filepath.exists():
+        console.print(f"[bold red]Error:[/bold red] File '{filepath}' not found.")
+        sys.exit(1)
+
+    try:
+        result = claim_next(filepath, args.as_, wait=args.wait, timeout=args.timeout)
+    except PatchError as pe:
+        console.print(f"[bold red]Next Error:[/bold red] {escape(str(pe))}")
+        sys.exit(1)
+
+    if args.json:
+        import json
+        task = result.task
+        print(json.dumps({
+            "status": result.status,
+            "task": None if task is None else {
+                "id": task.id, "title": task.title, "owner": task.owner, "touches": task.touches,
+                "refs": task.refs, "test": task.test_cmd, "after": task.dependencies,
+            },
+        }, indent=2))
+        return
+    # Plain print: the prompt contains [tag: ...] text that rich would treat as markup.
+    print(format_next_message(result, args.file))
 
 def cmd_lint(args):
     filepath = Path(args.file)
@@ -475,12 +502,19 @@ def main():
     p_patch = subparsers.add_parser("patch", help="Apply in-place mutations to a spec file")
     p_patch.add_argument("file", help="Path to .aspec file")
     p_patch.add_argument("--set", "-s", action="append", help="Set task status (e.g. T2=done)")
-    p_patch.add_argument("--verify", action="store_true", help="Run [test: ...] verification gate before marking task done")
+    p_patch.add_argument("--verify", action="store_true", help="Before marking a task done, check it only changed its [touch: ...] files and run its [test: ...] gate")
     p_patch.add_argument("--add-task", action="append", help="Add new task (e.g. 'T7: title [after: T6]')")
     p_patch.add_argument("--add-why", action="append", help="Add rationale (e.g. 'key: reason')")
     p_patch.add_argument("--add-rule", action="append", help="Add rule (e.g. 'key: constraint')")
 
     # ready
+    p_next = subparsers.add_parser("next", help="Atomically claim the next ready task and print its scoped prompt")
+    p_next.add_argument("file", help="Path to .aspec file")
+    p_next.add_argument("--as", dest="as_", required=True, metavar="NAME", help="Agent name recorded as the task owner")
+    p_next.add_argument("--wait", action="store_true", help="Keep polling until a task is ready or all tasks are done")
+    p_next.add_argument("--timeout", type=float, default=90.0, help="Seconds to wait with --wait (default 90)")
+    p_next.add_argument("--json", action="store_true", help="Output JSON for orchestrator agents")
+
     p_ready = subparsers.add_parser("ready", help="List unblocked tasks and conflict-free parallel swarm batches")
     p_ready.add_argument("file", help="Path to .aspec file")
     p_ready.add_argument("--json", action="store_true", help="Output JSON for orchestrator agents")
@@ -532,6 +566,7 @@ def main():
         "compress": cmd_compress,
         "mcp": cmd_mcp,
         "init": cmd_init,
+        "next": cmd_next,
     }
 
     if args.subcommand in dispatch:
