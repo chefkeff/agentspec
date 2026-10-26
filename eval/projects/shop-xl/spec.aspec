@@ -1,0 +1,82 @@
+@spec 0.3
+@meta app: "shop" | stack: "python3.11 stdlib only" | layout: "package in src/shop, tests in tests/"
+
+!type Item = { sku: str, name: str, price_cents: int }
+!type LineItem = { sku: str, qty: int }
+!type Order = { id: str, lines: LineItem[], subtotal_cents: int, discount_cents: int, tax_cents: int, total_cents: int }
+!type Customer = { id: str, name: str, email: str, spend_cents: int }
+
+!svc Inventory:
+  add_item(item: Item, qty: int) -> None
+  get_item(sku: str) -> Item | UnknownSku
+  stock(sku: str) -> int
+  remove(sku: str, qty: int) -> None | OutOfStock
+  reserve(sku: str, qty: int) -> str | OutOfStock
+  release(reservation_id: str) -> None
+  commit(reservation_id: str) -> None
+
+!svc Pricing:
+  apply_discount(subtotal_cents: int, code: str | None) -> int | InvalidCode
+  loyalty_discount(amount_cents: int, tier: str) -> int | ValueError
+
+!svc Tax:
+  tax_cents(amount_cents: int, region: str) -> int | ValueError
+
+!svc Checkout:
+  checkout(inventory: Inventory, cart: LineItem[], region: str, order_id: str, code: str | None = None) -> Order | OutOfStock
+
+!svc Receipt:
+  format_money(cents: int) -> str
+  format_receipt(order: Order, items: dict[str, Item]) -> str
+
+!svc Report:
+  summarize(orders: Order[]) -> dict
+
+!svc Customers:
+  add_customer(id: str, name: str, email: str) -> Customer | DuplicateCustomer | ValueError
+  get(id: str) -> Customer | UnknownCustomer
+  record_spend(id: str, cents: int) -> None
+  tier(id: str) -> str
+
+!svc OrderStore:
+  save(order: Order, customer_id: str) -> None | DuplicateOrder
+  get(order_id: str) -> Order | UnknownOrder
+  all() -> Order[]
+  by_customer(customer_id: str) -> Order[]
+
+!svc Api:
+  handle(req: dict) -> dict
+
+!invariant money: "All money is integer cents; never use floats for stored or returned amounts"
+!rule modules: "Models live in shop/models.py; every exception class lives in shop/errors.py; class Inventory in shop/inventory.py; apply_discount and loyalty_discount in shop/pricing.py; tax_cents in shop/tax.py; checkout in shop/checkout.py; format_money and format_receipt in shop/receipt.py; summarize in shop/report.py; class Customers in shop/customers.py; class OrderStore in shop/orders.py; API handlers in shop/api.py"
+!rule errors: "Exception classes and their bases: UnknownSku(KeyError), OutOfStock(Exception), InvalidCode(ValueError), UnknownCustomer(KeyError), DuplicateCustomer(ValueError), UnknownOrder(KeyError), DuplicateOrder(ValueError)"
+!rule inventory: "add_item adds qty to existing stock and stores the latest Item for that sku; stock() of an unknown sku is 0; get_item and remove of an unknown sku raise UnknownSku; remove raises OutOfStock when qty exceeds available stock and changes nothing; any qty <= 0 raises ValueError"
+!rule reservations: "reserve() holds units: held units are excluded from stock(), remove() and further reserve() calls; reserve of an unknown sku raises UnknownSku, of more than available raises OutOfStock, of qty <= 0 raises ValueError; it returns a unique id; release(id) returns the units; commit(id) removes them permanently; release or commit of an unknown or already released/committed id raises KeyError"
+!rule pricing: "apply_discount returns the discount in cents: None or empty code gives 0; SAVE10 gives 10 percent of subtotal rounded down; FLAT500 gives min(500, subtotal); codes are case-insensitive; any other code raises InvalidCode"
+!rule loyalty: "loyalty_discount(amount, tier) gives 5 percent for gold, 2 percent for silver, 0 for bronze, rounded down; any other tier raises ValueError"
+!rule tax: "Rates: SE 25 percent, UK 20 percent, US-CA 7.25 percent; round half up to the nearest cent using integer arithmetic; region names are case-sensitive; an unknown region raises ValueError"
+!rule checkout: "Duplicate skus in the cart are combined into one line, keeping first-appearance order; subtotal is the sum of price_cents * qty; discount = apply_discount(subtotal, code); tax = tax_cents(subtotal - discount, region); total = subtotal - discount + tax; checkout removes the stock and is all-or-nothing: if it raises for any reason (UnknownSku, OutOfStock, InvalidCode, unknown region) the inventory is left unchanged"
+!rule receipt: "format_money(12345) is 123.45, format_money(5) is 0.05, format_money(-150) is -1.50; format_receipt returns these lines joined by single newlines with no trailing newline: Order <id>, then one line per order line as <qty> x <name> @ <unit price> = <line total>, then Subtotal: <x>, Discount: -<x>, Tax: <x>, Total: <x> (the Discount line is always present, e.g. Discount: -0.00)"
+!rule report: "summarize returns a dict with keys count (number of orders), revenue_cents (sum of total_cents), tax_cents (sum of tax_cents) and top_sku (sku with the highest total qty across all orders, ties broken alphabetically, None when there are no orders)"
+!rule customers: "add_customer stores and returns a new Customer with spend_cents 0; a duplicate id raises DuplicateCustomer; the email must contain exactly one @ with a non-empty part before it and a dot somewhere after it, otherwise ValueError; get, record_spend and tier of an unknown id raise UnknownCustomer; record_spend adds cents (must be > 0, else ValueError); tier is bronze below 10000 spend cents, silver from 10000 to 49999, gold from 50000"
+!rule orderstore: "save stores an order for a customer id; saving an order id that already exists raises DuplicateOrder and changes nothing; get of an unknown id raises UnknownOrder; all() and by_customer() return orders in the order they were saved (by_customer of an unknown customer returns an empty list)"
+!rule api: "Api(inventory, store, customers) and its handler registry already exist in shop/api.py; add each operation as a function decorated with @handler(op) that takes (api, req) and returns a dict of result fields; Api.handle wraps results as {ok: True, ...fields} and maps any raised exception to {ok: False, error: <exception class name>}"
+!rule api_stock: "op add_stock with sku, name, price_cents, qty adds stock and returns no fields; op stock with sku returns field stock"
+!rule api_orders: "op place_order with customer_id, order_id, region, lines (list of {sku, qty}) and optional code: an unknown customer raises UnknownCustomer and an existing order id raises DuplicateOrder, both before any stock changes; otherwise run checkout, save the order for the customer, record its total_cents as customer spend, and return fields order_id, total_cents and tier (the tier after recording the spend)"
+!rule api_reports: "op report returns the summarize fields over all stored orders; op customer with customer_id returns fields name, spend_cents and tier"
+!rule scope: "Only modify the files listed for your task; never modify anything under tests/"
+
+[x] T1: domain models, empty errors module and the Api skeleton with its handler registry [touch: src/shop/models.py, src/shop/errors.py, src/shop/api.py]
+[ ] T2: Inventory core with add_item, get_item, stock, remove plus UnknownSku and OutOfStock errors [after: T1] [ref: Inventory, Item] [touch: src/shop/inventory.py, src/shop/errors.py] [test: python3 -m pytest tests/test_inventory.py -q]
+[ ] T3: discount codes in apply_discount plus the InvalidCode error [after: T1] [ref: Pricing] [touch: src/shop/pricing.py, src/shop/errors.py] [test: python3 -m pytest tests/test_pricing.py -q]
+[ ] T4: regional tax calculation [after: T1] [ref: Tax] [touch: src/shop/tax.py] [test: python3 -m pytest tests/test_tax.py -q]
+[ ] T5: stock reservations reserve, release and commit on Inventory [after: T2] [ref: Inventory] [touch: src/shop/inventory.py] [test: python3 -m pytest tests/test_reservations.py -q]
+[ ] T6: all-or-nothing checkout producing an Order [after: T3, T4, T5] [ref: Checkout, Inventory, Pricing, Tax, Order] [touch: src/shop/checkout.py] [test: python3 -m pytest tests/test_checkout.py -q]
+[ ] T7: money formatting and receipt rendering [after: T1] [ref: Receipt, Order, Item] [touch: src/shop/receipt.py] [test: python3 -m pytest tests/test_receipt.py -q]
+[ ] T8: sales report summary over orders [after: T6] [ref: Report, Order] [touch: src/shop/report.py] [test: python3 -m pytest tests/test_report.py -q]
+[ ] T9: customer registry with spend tracking and tiers plus UnknownCustomer and DuplicateCustomer errors [after: T1] [ref: Customers, Customer] [touch: src/shop/customers.py, src/shop/errors.py] [test: python3 -m pytest tests/test_customers.py -q]
+[ ] T10: loyalty discount by tier [after: T1] [ref: Pricing] [touch: src/shop/pricing.py] [test: python3 -m pytest tests/test_loyalty.py -q]
+[ ] T11: order store plus UnknownOrder and DuplicateOrder errors [after: T1] [ref: OrderStore, Order] [touch: src/shop/orders.py, src/shop/errors.py] [test: python3 -m pytest tests/test_orders.py -q]
+[ ] T12: API stock operations add_stock and stock [after: T2] [ref: Api, Inventory] [touch: src/shop/api.py] [test: python3 -m pytest tests/test_api_stock.py -q]
+[ ] T13: API place_order operation [after: T6, T9, T11] [ref: Api, Checkout, Customers, OrderStore] [touch: src/shop/api.py] [test: python3 -m pytest tests/test_api_orders.py -q]
+[ ] T14: API report and customer operations [after: T8, T9, T11] [ref: Api, Report, Customers, OrderStore] [touch: src/shop/api.py] [test: python3 -m pytest tests/test_api_reports.py -q]

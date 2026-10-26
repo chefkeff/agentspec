@@ -10,4 +10,5 @@ Loop:
 3. Implement it, editing only the task's listed files.
 4. Run the task's test command until it passes.
 5. Mark it done by changing its line to `- [x] T<id>`.
-6. Repeat. If nothing is available but tasks are still in progress, run `sleep 20` and check again. Stop when every task is done.
+6. To give a task back without finishing it, change its line back to `- [ ] T<id>`.
+7. Repeat. If nothing is available but tasks are still in progress, run `sleep 20` and check again. Stop when every task is done.
