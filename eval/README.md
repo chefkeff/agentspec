@@ -39,11 +39,27 @@ Per run, the harness records hidden tests passed, tasks fully passing, tasks mar
 - **Why:** checklist agents spend turns re-reading `TODO.md` and retrying edits after another agent changed it first. agentspec agents coordinate through one-line CLI calls, and refused claims are resolved in one step.
 - **Caveats:** one small, precisely specified project; 5 runs per condition. The two "files edited by 2+ agents" cases are `errors.py`, which T2 and T3 legitimately share. The two permission denials were agents trying an `until ...; do sleep` polling loop, which the tool allowlist doesn't cover.
 
-## shop-xl: no valid results yet
+## Results: shop-xl (2026-10-27, 3 runs per condition, 6 Sonnet agents, `next` protocol)
+
+| Metric | agentspec | checklist |
+| :--- | ---: | ---: |
+| All 13 tasks pass | 3/3 | 3/3 |
+| Hidden tests passed | 59/59 every run | 59/59 every run |
+| Tasks marked done but failing | 0 | 0 |
+| Cost per run, USD (mean, range) | 1.48 (1.41–1.52) | 3.23 (3.03–3.44) |
+| Wall-clock per run, s (mean, range) | 167 (151–180) | 210 (190–242) |
+| Agent turns per run (mean, range) | 115 (107–120) | 223 (204–234) |
+
+- **Quality: no difference.** Both conditions solved everything in every run.
+- **Cost: agentspec about 54% cheaper** (the checklist costs 2.2×). Every agentspec run was cheaper, faster and used fewer turns than every checklist run. With 3 runs per condition the smallest possible two-sided Mann–Whitney p-value is 0.10, which is what all three measures reach.
+- **Time: about 20% faster; turns: about half.**
+- **Why:** across the 3 runs, checklist agents made 300 reads, 108 edits to `TODO.md` that failed because another agent had changed it first, and 56 `sleep` calls. agentspec agents made 62 `aspec next` calls and no `sleep` calls: `next --wait` replaced polling entirely. The scope check never fired, because no agent edited files outside its task.
+- **Validity:** every run ran outside the repository and none touched it; no API errors, timeouts or test edits.
+- **Caveats:** the agentspec condition here includes `aspec next`, so it is not directly comparable with the shop results above, which used the earlier ready/claim loop. Three runs per condition is a small sample, though the two conditions did not overlap on any cost measure.
 
 The first shop-xl pilots were discarded. Their run directories were inside this repository, and Claude Code shows agents the repository's git status, which listed the paths of the other eval projects. Agents in both conditions followed those paths, read the shop project's hidden tests and wrote files into its starting template (since restored). The harness now puts run directories in the system temp directory, refuses a `--workdir` inside a git repository, and marks a run invalid if any agent touches the repository. Re-checked with that rule, all 12 shop runs above are clean.
 
-> **Protocol change:** the shop results above used the earlier agentspec protocol (`ready`, then claim with `patch`, then `pack`). [protocols/agentspec.md](protocols/agentspec.md) now uses `aspec next --wait`, which claims and returns the next task in one call, and `--verify` now also checks file scope. Rerun to measure the new flow.
+> **Protocol versions:** the shop results used the earlier agentspec protocol (`ready`, then claim with `patch`, then `pack`). The shop-xl results and [protocols/agentspec.md](protocols/agentspec.md) use `aspec next --wait`, which claims and returns the next task in one call, with `--verify` also checking file scope.
 
 ## Running
 
