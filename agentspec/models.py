@@ -28,6 +28,9 @@ class InvariantDef:
     key: str
     content: str
 
+    def to_line(self) -> str:
+        return f'!{self.kind} {self.key}: "{self.content}"'
+
 @dataclass
 class TaskDef:
     id: str
@@ -38,6 +41,23 @@ class TaskDef:
     touches: List[str] = field(default_factory=list)
     test_cmd: Optional[str] = None
     owner: Optional[str] = None  # agent that claimed the task ([by: ...])
+
+    def to_line(self) -> str:
+        """Serialize this task as a single .aspec task line."""
+        mark = {TaskStatus.DONE: "x", TaskStatus.IN_PROGRESS: ">"}.get(self.status, " ")
+        tags = []
+        if self.dependencies:
+            tags.append(f"[after: {', '.join(self.dependencies)}]")
+        if self.refs:
+            tags.append(f"[ref: {', '.join(self.refs)}]")
+        if self.touches:
+            tags.append(f"[touch: {', '.join(self.touches)}]")
+        if self.test_cmd:
+            tags.append(f"[test: {self.test_cmd}]")
+        if self.owner:
+            tags.append(f"[by: {self.owner}]")
+        tag_str = f" {' '.join(tags)}" if tags else ""
+        return f"[{mark}] {self.id}: {self.title}{tag_str}"
 
 @dataclass
 class SpecDoc:
@@ -91,7 +111,7 @@ class SpecDoc:
         if self.invariants:
             lines.append("# RATIONALES & INVARIANTS")
             for inv in self.invariants:
-                lines.append(f'!{inv.kind} {inv.key}: "{inv.content}"')
+                lines.append(inv.to_line())
             lines.append("")
 
         if self.types:
@@ -110,24 +130,6 @@ class SpecDoc:
         if self.tasks:
             lines.append("# TASK EXECUTION DAG")
             for t in self.tasks:
-                if t.status == TaskStatus.DONE:
-                    mark = "x"
-                elif t.status == TaskStatus.IN_PROGRESS:
-                    mark = ">"
-                else:
-                    mark = " "
-                tags = []
-                if t.dependencies:
-                    tags.append(f"[after: {', '.join(t.dependencies)}]")
-                if t.refs:
-                    tags.append(f"[ref: {', '.join(t.refs)}]")
-                if t.touches:
-                    tags.append(f"[touch: {', '.join(t.touches)}]")
-                if t.test_cmd:
-                    tags.append(f"[test: {t.test_cmd}]")
-                if t.owner:
-                    tags.append(f"[by: {t.owner}]")
-                tag_str = f" {' '.join(tags)}" if tags else ""
-                lines.append(f"[{mark}] {t.id}: {t.title}{tag_str}")
+                lines.append(t.to_line())
 
         return "\n".join(lines).strip() + "\n"

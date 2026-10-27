@@ -49,7 +49,7 @@ Whenever you are assigned to implement features or advance the project, follow t
                              │
                              ▼
                   ┌──────────────────────┐
-                  │ 4. Mark Complete     │  aspec patch <file> --set T<id>=done --verify
+                  │ 4. Mark Complete     │  aspec patch <file> --set T<id>=done@<name> --verify
                   └──────────┬───────────┘
                              │
                              └──▶ back to 1 until `next` reports all tasks are done
@@ -61,6 +61,7 @@ aspec next project.aspec --as <name> --wait
 ```
 * `next` finds a ready task, claims it for you atomically and prints its scoped prompt: the contracts, rules and prerequisite tasks you need, the files you may edit, and the command to finish it.
 * If you already hold a task, `next` gives you that task again rather than a new one.
+* Your claim is a lease (30 minutes by default). Running `aspec next --as <name>` or `aspec test <file> -t T<id>` renews it. If it runs out, the task is released and another agent may take it.
 * If it reports that no task is ready yet, run it again. If it reports that all tasks are done, stop.
 * Orchestrators that assign work themselves can still use `aspec ready project.aspec --json` and claim with `aspec patch project.aspec --set T<id>=in_progress@<name>`.
 
@@ -79,9 +80,10 @@ Ensure all tests exit with status code `0`. If a test fails, debug and resolve t
 ### Step 4: Mark the Task Done
 Mark the task as completed using the verification guard:
 ```bash
-aspec patch project.aspec --set T<id>=done --verify
+aspec patch project.aspec --set T<id>=done@<name> --verify
 ```
-* `--verify` first checks that, since you claimed the task, no files outside its `[touch: ...]` list changed (other agents' task files excepted), then runs the test gate.
+* `patch` first checks that, since you claimed the task, no files outside its `[touch: ...]` list changed (other agents' task files excepted); `--verify` then runs the test gate.
+* `@<name>` makes the patch fail if your claim expired and the task was released or taken over. In that case, run `aspec next` again.
 * If both pass, `agentspec` updates the status to `[x]`.
 * If you changed files outside your scope, revert those changes and try again. If the test fails, `agentspec` rejects the transition and outputs the failure logs.
 * To give a task back without finishing it: `aspec patch project.aspec --set T<id>=todo`.

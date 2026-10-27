@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, List, Dict, Optional, Tuple
 from .models import SpecDoc, TaskDef, TaskStatus, InvariantDef
@@ -50,11 +50,12 @@ def _check_scope(spec_path: Path, doc: SpecDoc, task: TaskDef) -> None:
             "Revert those changes, or add the files to the task's [touch: ...] list."
         )
 
-def verify_mutations(doc: SpecDoc, mutations: List[str], spec_path: Optional[Path] = None) -> None:
+def verify_mutations(doc: SpecDoc, mutations: List[str], spec_path: Optional[Path] = None,
+                     run_gates: bool = True) -> None:
     """
     For every task the mutations would mark done: check that it only changed its
     [touch: ...] files since it was claimed (when spec_path is given and a claim
-    snapshot exists), then run its [test: ...] gate.
+    snapshot exists), then, with run_gates, run its [test: ...] gate.
     """
     task_map = {t.id: t for t in doc.tasks}
     for mut in mutations:
@@ -66,7 +67,7 @@ def verify_mutations(doc: SpecDoc, mutations: List[str], spec_path: Optional[Pat
                 continue
             if spec_path is not None:
                 _check_scope(spec_path, doc, task)
-            if task.test_cmd:
+            if run_gates and task.test_cmd:
                 _run_gate(task)
 
 def _check_prerequisites(task: TaskDef, task_map: Dict[str, TaskDef], action: str) -> None:
@@ -81,7 +82,8 @@ def apply_mutations(doc: SpecDoc, mutations: List[str], verify: bool = False) ->
       - <task_id>=in_progress[@owner]  (claim: task must be TODO, prerequisites done,
                                         and no file-lock conflict with in-progress tasks;
                                         re-claiming by the same owner is a no-op)
-      - <task_id>=done                 (prerequisites must be done)
+      - <task_id>=done[@owner]         (prerequisites must be done; with @owner, the
+                                        task must still be claimed by that owner)
       - <task_id>=todo                 (release a claim)
       - +task <id>: <title> [after: <deps>] [ref: ...] [touch: ...] [test: ...]
       - +why <key>: "<content>"
@@ -102,6 +104,17 @@ def apply_mutations(doc: SpecDoc, mutations: List[str], verify: bool = False) ->
             target_task = task_map[task_id]
 
             if status == TaskStatus.DONE:
+                if owner and not (target_task.status == TaskStatus.IN_PROGRESS and target_task.owner == owner):
+                    if target_task.status == TaskStatus.DONE:
+                        state = "it is already done"
+                    elif target_task.status == TaskStatus.IN_PROGRESS:
+                        state = f"it is now claimed by '{target_task.owner}'"
+                    else:
+                        state = "it is no longer claimed"
+                    raise PatchError(
+                        f"Cannot complete task '{task_id}' as '{owner}': {state}. "
+                        "Your claim may have expired; run aspec next to get a task."
+                    )
                 _check_prerequisites(target_task, task_map, "complete")
                 if verify and target_task.test_cmd:
                     _run_gate(target_task)
@@ -201,30 +214,128 @@ def _atomic_write(filepath: Path, content: str) -> None:
             os.unlink(tmp_name)
         raise
 
-def _sync_snapshots(filepath: Path, doc: SpecDoc, mutations: List[str]) -> None:
-    """Record a file snapshot for newly claimed tasks; drop it for finished or released ones."""
-    for mut in mutations:
-        mut = mut.strip()
-        if "=" not in mut or mut.startswith("+"):
-            continue
-        task_id, status, owner = _parse_status_mutation(mut)
-        if status == TaskStatus.IN_PROGRESS:
-            if not scope.snapshot_path(filepath, task_id).exists():
-                scope.take_snapshot(filepath, doc, task_id, owner)
-        else:
-            scope.drop_snapshot(filepath, task_id)
+_TASK_LINE = re.compile(r"^\s*\[[ xX>]\]\s*([\w\.\-]+)\s*:")
+_INV_LINE = re.compile(r"^\s*!(why|rule|invariant)\s")
 
-def patch_file(filepath: Path, mutations: List[str], verify: bool = False) -> SpecDoc:
-    if verify:
-        # Run (possibly slow) checks before taking the lock so other agents aren't blocked.
-        verify_mutations(parse_spec(filepath.read_text(encoding="utf-8")), mutations, spec_path=filepath)
+def render_patched(original: str, before: SpecDoc, after: SpecDoc) -> str:
+    """
+    Write `after` by editing `original` line by line, so comments, blank lines and
+    the formatting of untouched entries survive. Falls back to the canonical
+    serialization if the edited text would not parse back to `after`.
+    """
+    lines = original.splitlines()
+    task_lines = {}
+    for i, line in enumerate(lines):
+        m = _TASK_LINE.match(line)
+        if m:
+            task_lines[m.group(1)] = i
+
+    old_tasks = {t.id: t for t in before.tasks}
+    for t in after.tasks:
+        if t.id in old_tasks and t.id in task_lines and t != old_tasks[t.id]:
+            lines[task_lines[t.id]] = t.to_line()
+
+    inserts = []  # (index, new lines); applied bottom-up so indices stay valid
+    new_tasks = [t.to_line() for t in after.tasks if t.id not in old_tasks]
+    if new_tasks:
+        if task_lines:
+            inserts.append((max(task_lines.values()) + 1, new_tasks))
+        else:
+            inserts.append((len(lines), ["", "# TASK EXECUTION DAG"] + new_tasks))
+    new_invs = [inv.to_line() for inv in after.invariants[len(before.invariants):]]
+    if new_invs:
+        inv_lines = [i for i, line in enumerate(lines) if _INV_LINE.match(line)]
+        if inv_lines:
+            inserts.append((max(inv_lines) + 1, new_invs))
+        else:
+            header = [i for i, line in enumerate(lines) if line.startswith("@")]
+            at = max(header) + 1 if header else 0
+            inserts.append((at, ["", "# RATIONALES & INVARIANTS"] + new_invs))
+    for at, new in sorted(inserts, key=lambda x: x[0], reverse=True):
+        lines[at:at] = new
+
+    text = "\n".join(lines).rstrip("\n") + "\n"
+    try:
+        if parse_spec(text) == after:
+            return text
+    except Exception:
+        pass
+    return after.to_aspec()
+
+def lease_seconds_for(doc: SpecDoc, override: Optional[float] = None) -> float:
+    """Claim lease length: the override, else '@meta lease: "30m"', else the default."""
+    if override is not None:
+        return float(override)
+    raw = str(doc.meta.get("lease", "")).strip().lower()
+    if raw:
+        units = {"s": 1, "m": 60, "h": 3600}
+        try:
+            if raw[-1] in units:
+                return float(raw[:-1]) * units[raw[-1]]
+            return float(raw)
+        except ValueError:
+            raise PatchError(f"Invalid lease '{raw}' in @meta: use seconds or a number with s, m or h.")
+    return scope.DEFAULT_LEASE_SECONDS
+
+def _release_expired(filepath: Path, doc: SpecDoc, lease_seconds: float) -> List[str]:
+    """Return expired claims to TODO (in `doc`) and forget their claim files."""
+    released = []
+    for task in scope.expired_claims(filepath, doc, lease_seconds):
+        task.status, task.owner = TaskStatus.TODO, None
+        scope.drop_claim(filepath, task.id)
+        released.append(task.id)
+    return released
+
+def _status_mutations(mutations: List[str]) -> List[Tuple[str, TaskStatus, Optional[str]]]:
+    return [_parse_status_mutation(m.strip()) for m in mutations
+            if "=" in m and not m.strip().startswith("+")]
+
+def _record_claims(filepath: Path, doc: SpecDoc, mutations: List[str]) -> List[str]:
+    """
+    Under the spec lock: renew leases of claimed tasks and forget finished or
+    released ones. Returns the claimed task ids still needing a scope snapshot.
+    """
+    needs_snapshot = []
+    for task_id, status, _ in _status_mutations(mutations):
+        task = next((t for t in doc.tasks if t.id == task_id), None)
+        if status == TaskStatus.IN_PROGRESS and task is not None:
+            scope.renew_lease(filepath, task_id, task.owner)
+            if not scope.snapshot_path(filepath, task_id).exists():
+                needs_snapshot.append(task_id)
+        elif status != TaskStatus.IN_PROGRESS:
+            scope.drop_claim(filepath, task_id)
+    return needs_snapshot
+
+def _take_snapshots(filepath: Path, doc: SpecDoc, task_ids: List[str]) -> None:
+    # Taken after the spec lock is released: hashing a large project should not
+    # block other agents, and nobody else may edit a just-claimed task's files.
+    for task_id in task_ids:
+        task = next(t for t in doc.tasks if t.id == task_id)
+        scope.take_snapshot(filepath, doc, task_id, task.owner)
+
+def patch_file(filepath: Path, mutations: List[str], verify: bool = False,
+               lease_seconds: Optional[float] = None) -> SpecDoc:
+    """
+    Apply mutations to a spec file under its lock. Tasks marked done are always
+    checked against their [touch: ...] scope; with `verify` their [test: ...]
+    gate must pass too. Claims let expired leases go first, so a task held by a
+    vanished agent can be taken over.
+    """
+    # Run (possibly slow) checks before taking the lock so other agents aren't blocked.
+    verify_mutations(parse_spec(filepath.read_text(encoding="utf-8")), mutations,
+                     spec_path=filepath, run_gates=verify)
 
     with spec_lock(filepath):
         # Re-read under the lock: another agent may have patched the file meanwhile.
-        doc = parse_spec(filepath.read_text(encoding="utf-8"))
+        original = filepath.read_text(encoding="utf-8")
+        before = parse_spec(original)
+        doc = parse_spec(original)
+        if any(st == TaskStatus.IN_PROGRESS for _, st, _ in _status_mutations(mutations)):
+            _release_expired(filepath, doc, lease_seconds_for(doc, lease_seconds))
         updated_doc = apply_mutations(doc, mutations)
-        _atomic_write(filepath, updated_doc.to_aspec())
-        _sync_snapshots(filepath, updated_doc, mutations)
+        _atomic_write(filepath, render_patched(original, before, updated_doc))
+        needs_snapshot = _record_claims(filepath, updated_doc, mutations)
+    _take_snapshots(filepath, updated_doc, needs_snapshot)
     return updated_doc
 
 @dataclass
@@ -232,35 +343,57 @@ class NextResult:
     status: str  # 'claimed', 'resumed', 'all_done' or 'none_ready'
     task: Optional[TaskDef]
     doc: SpecDoc
+    released: List[str] = field(default_factory=list)  # expired claims returned to TODO
 
 def claim_next(filepath: Path, owner: str, wait: bool = False, timeout: float = 90.0,
-               poll_interval: float = 3.0) -> NextResult:
+               poll_interval: float = 3.0, lease_seconds: Optional[float] = None) -> NextResult:
     """
     Atomically find and claim the next ready task for `owner`.
 
     If `owner` already holds an in-progress task, that task is returned instead
-    ('resumed'), so an agent never holds two tasks. With `wait`, keeps polling
-    until a task becomes ready, every task is done, or `timeout` seconds pass.
+    ('resumed') and its lease renewed, so an agent never holds two tasks. Claims
+    whose lease ran out are released first. With `wait`, keeps polling until a
+    task becomes ready, every task is done, or `timeout` seconds pass.
     """
     if not owner:
         raise PatchError("An owner name is required to claim a task.")
     deadline = time.monotonic() + timeout
+    released: List[str] = []
     while True:
         with spec_lock(filepath):
-            doc = parse_spec(filepath.read_text(encoding="utf-8"))
+            original = filepath.read_text(encoding="utf-8")
+            before = parse_spec(original)
+            doc = parse_spec(original)
             held = next((t for t in doc.tasks if t.status == TaskStatus.IN_PROGRESS and t.owner == owner), None)
             if held:
-                return NextResult("resumed", held, doc)
+                scope.renew_lease(filepath, held.id, owner)
+                return NextResult("resumed", held, doc, released)
+            newly = _release_expired(filepath, doc, lease_seconds_for(doc, lease_seconds))
+            released += newly
             if all(t.status == TaskStatus.DONE for t in doc.tasks):
-                return NextResult("all_done", None, doc)
+                return NextResult("all_done", None, doc, released)
             schedule = get_task_schedule(doc)
             if schedule.ready_tasks:
-                task = schedule.ready_tasks[0]
-                updated = apply_mutations(doc, [f"{task.id}=in_progress@{owner}"])
-                _atomic_write(filepath, updated.to_aspec())
-                _sync_snapshots(filepath, updated, [f"{task.id}=in_progress@{owner}"])
-                claimed = next(t for t in updated.tasks if t.id == task.id)
-                return NextResult("claimed", claimed, updated)
+                mutation = f"{schedule.ready_tasks[0].id}=in_progress@{owner}"
+                updated = apply_mutations(doc, [mutation])
+                _atomic_write(filepath, render_patched(original, before, updated))
+                needs_snapshot = _record_claims(filepath, updated, [mutation])
+                claimed = next(t for t in updated.tasks if t.id == schedule.ready_tasks[0].id)
+            elif newly:
+                _atomic_write(filepath, render_patched(original, before, doc))
+        if schedule.ready_tasks:
+            _take_snapshots(filepath, updated, needs_snapshot)
+            return NextResult("claimed", claimed, updated, released)
         if not wait or time.monotonic() >= deadline:
-            return NextResult("none_ready", None, doc)
+            return NextResult("none_ready", None, doc, released)
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+
+def renew_task_lease(filepath: Path, task_id: str) -> bool:
+    """Renew the lease of an in-progress task (e.g. while its tests run). Returns False if it is not claimed."""
+    with spec_lock(filepath):
+        doc = parse_spec(filepath.read_text(encoding="utf-8"))
+        task = next((t for t in doc.tasks if t.id == task_id), None)
+        if task is None or task.status != TaskStatus.IN_PROGRESS:
+            return False
+        scope.renew_lease(filepath, task_id, task.owner)
+        return True

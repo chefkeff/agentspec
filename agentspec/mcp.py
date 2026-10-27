@@ -7,7 +7,7 @@ from typing import Dict, Any
 from .parser import parse_spec
 from .transpiler import to_markdown
 from .packer import format_subagent_prompt, format_next_message
-from .patcher import patch_file, claim_next, PatchError
+from .patcher import patch_file, claim_next, renew_task_lease, PatchError
 from .linter import lint_spec
 from .scheduler import get_task_schedule
 
@@ -50,7 +50,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "List of mutations, e.g. ['T2=in_progress@agent-a', 'T2=done', '+task T5: title [after: T4]']. Claims are rejected if the task is not ready, already claimed, or its [touch: ...] files are held by another in-progress task"
                 },
-                "verify": {"type": "boolean", "description": "Before marking a task done, check it only changed its [touch: ...] files and run its [test: ...] gate"}
+                "verify": {"type": "boolean", "description": "Before marking a task done, also run its [test: ...] gate (the [touch: ...] scope is always checked)"}
             },
             "required": ["file_path", "mutations"]
         }
@@ -152,6 +152,7 @@ def handle_tool_call(name: str, args: Dict[str, Any]) -> str:
             return f"Error: Task '{task_id}' not found."
         if not target_task.test_cmd:
             return f"Task '{task_id}' has no [test: ...] verification command."
+        renew_task_lease(fpath, task_id)  # running the gate shows the owner is still working
         res = subprocess.run(target_task.test_cmd, shell=True, capture_output=True, text=True)
         status = "PASSED" if res.returncode == 0 else f"FAILED (exit code {res.returncode})"
         return f"Test {status}:\n{res.stdout}\n{res.stderr}".strip()

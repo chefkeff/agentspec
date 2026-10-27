@@ -1,4 +1,4 @@
-# agentspec (`aspec`) v0.3
+# agentspec (`aspec`) v0.4
 
 **agentspec** is a token-dense specification and task-DAG framework for AI agent-to-agent memory, multi-agent swarm orchestration, and state persistence, with on-demand deterministic compilation into human-readable Markdown and Mermaid diagrams.
 
@@ -7,6 +7,7 @@ Instead of having LLM agents exchange verbose Markdown files that bloat context 
 - saves **40%–80% tokens** per turn compared to equivalent Markdown,
 - enforces DAG prerequisites, so tasks can't be claimed or completed out of order,
 - hands each agent its next task in one atomic step (`aspec next`), so agents never claim the same work,
+- gives each claim a lease, so a task held by an agent that crashed or ran out of turns is handed to another agent,
 - prevents file-write conflicts between parallel subagents through declared file locks,
 - checks that a finished task only changed the files it declared,
 - serializes concurrent edits to the spec, so simultaneous agents never lose each other's updates,
@@ -52,9 +53,11 @@ In an [A/B evaluation](eval/README.md) against agents coordinating through a sha
 | :--- | :--- |
 | `[after: T1, T2]` | Prerequisites that must be done before the task can be claimed or completed |
 | `[ref: AuthService, Token]` | Contracts the task uses (drives pruning in `aspec pack`) |
-| `[touch: src/a.py, src/models/, src/*.py]` | File locks: the only files the task may modify (exact paths, directories or glob patterns, relative to the spec's directory). Checked by `patch --verify`. A task **without** `[touch: ...]` has an undeclared scope and is treated as conflicting with every other task |
+| `[touch: src/a.py, src/models/, src/*.py]` | File locks: the only files the task may modify (exact paths, directories or glob patterns, relative to the spec's directory). Checked whenever the task is marked done. A task **without** `[touch: ...]` has an undeclared scope and is treated as conflicting with every other task |
 | `[test: pytest tests/x.py]` | Acceptance gate run by `aspec test` and `aspec patch --verify` |
 | `[by: agent-a]` | Owner of an in-progress task, set when claiming with `T2=in_progress@agent-a` |
+
+In `@meta`, `lease: "30m"` sets how long a claim lasts without being renewed (seconds, or a number with `s`, `m` or `h`; default 30 minutes). See [Claim Leases](#claim-leases).
 
 ---
 
@@ -79,11 +82,11 @@ Requires Python 3.9+. Dependencies: `tiktoken`, `rich`.
 | `aspec init [file]` | Create a starter `.aspec` template (default `project.aspec`) |
 | `aspec check <file>` | Parse the spec and validate the task DAG (missing deps, cycles) |
 | `aspec lint <file>` | Workflow hygiene: out-of-order states, orphan tasks, unused types, empty services |
-| `aspec next <file> --as NAME [--wait]` | Atomically claim the next ready task and print its scoped prompt |
+| `aspec next <file> --as NAME [--wait] [--lease S]` | Atomically claim the next ready task and print its scoped prompt |
 | `aspec ready <file> [--json]` | Ready tasks, lock waits and conflict-free parallel batches |
 | `aspec pack <file> -t T3` | Minimal subagent prompt for one task |
 | `aspec patch <file> ...` | Claim, complete (with scope and test checks), release and add tasks; add rationale and rules |
-| `aspec test <file> [-t T2]` | Run `[test: ...]` verification gates |
+| `aspec test <file> [-t T2]` | Run `[test: ...]` verification gates (with `-t`, also renews the task's lease) |
 | `aspec render <file> [-o out.md]` | Transpile to Markdown with a Mermaid DAG |
 | `aspec view <file> [-o out.html]` | Standalone HTML dashboard |
 | `aspec benchmark <file>` | Token counts vs. equivalent Markdown (`tiktoken`) |
@@ -100,7 +103,8 @@ aspec next project.aspec --as agent-3 --wait --timeout 90   # block until a task
 aspec next project.aspec --as agent-3 --json                # structured output
 ```
 
-- If the agent already holds an in-progress task, `next` returns that task again instead of claiming a second one.
+- If the agent already holds an in-progress task, `next` returns that task again instead of claiming a second one, and renews its lease.
+- Claims whose lease has run out are released first, so their tasks can be claimed again.
 - Tasks whose files are locked by another in-progress task are skipped.
 - Outcomes: *claimed*, *resumed*, *all done*, or *none ready* (with `--wait`, it keeps polling until one of the others happens or the timeout passes; keep the timeout under your agent's shell-command limit).
 
@@ -124,8 +128,9 @@ Agents mutate state through `aspec patch` instead of rewriting the file:
 # Claim a task, recording who owns it
 aspec patch examples/swarm.aspec --set T2=in_progress@agent-a
 
-# Complete it, checking its file scope and running its [test: ...] gate first
-aspec patch examples/swarm.aspec --set T2=done --verify
+# Complete it, checking its file scope and running its [test: ...] gate first.
+# With @agent-a, it is rejected if agent-a's claim expired and the task moved on.
+aspec patch examples/swarm.aspec --set T2=done@agent-a --verify
 
 # Release a claim without completing it
 aspec patch examples/swarm.aspec --set T2=todo
@@ -138,8 +143,8 @@ aspec patch examples/swarm.aspec --add-rule 'auth: "All endpoints require a veri
 
 Guards applied by `patch`:
 
-- **Claiming** (`=in_progress`) is rejected if the task is already in progress (unless re-claimed by the same owner), already done, has unfinished prerequisites, or its `[touch: ...]` files overlap a task already in progress.
-- **Completing** (`=done`) is rejected if any prerequisite is not done. With `--verify`, it is also rejected if the task changed files outside its `[touch: ...]` list (see [Scope Checking](#scope-checking)) or its `[test: ...]` gate fails.
+- **Claiming** (`=in_progress`) is rejected if the task is already in progress (unless re-claimed by the same owner, which renews the lease, or the holder's lease has expired), already done, has unfinished prerequisites, or its `[touch: ...]` files overlap a task already in progress.
+- **Completing** (`=done`) is rejected if any prerequisite is not done or the task changed files outside its `[touch: ...]` list (see [Scope Checking](#scope-checking)). With `--verify`, it is also rejected if its `[test: ...]` gate fails. With `=done@owner`, it is rejected unless that owner still holds the claim.
 - **Releasing** (`=todo`) clears the owner and frees the task's file locks.
 - Multiple `--set` / `--add-*` flags apply in order, and the whole patch is rejected if any part fails, leaving the file unchanged.
 
@@ -190,13 +195,26 @@ aspec benchmark examples/project.aspec
 
 ## Scope Checking
 
-When a task is claimed (with `next` or `patch --set T<id>=in_progress`), agentspec records a fingerprint of every project file under the spec's directory in `<spec>.claims/T<id>.json`. When the task is marked done with `--verify`, the project is compared against that snapshot:
+When a task is claimed (with `next` or `patch --set T<id>=in_progress`), agentspec records a fingerprint of every project file under the spec's directory in `<spec>.claims/T<id>.json`. Whenever the task is marked done, with or without `--verify`, the project is compared against that snapshot:
 
 - Changed, created or deleted files covered by the task's own `[touch: ...]` list are fine.
 - So are files of other tasks that were in progress, or were started, while this task was held: those changes came from other agents.
 - Anything else is rejected, naming the files, before the test gate runs. The agent must revert those changes or the plan must be updated to include the files.
 
-Hidden files and directories, `__pycache__`, `node_modules` and the spec's own lock and claims files are ignored. Tasks without `[touch: ...]`, and tasks claimed before snapshots existed, are not checked. The snapshot is removed when the task is completed or released. Add `*.aspec.claims/` to your `.gitignore`.
+In a git repository, only tracked files and untracked files that are not ignored are fingerprinted, so `.gitignore` keeps build output and virtualenvs out. Elsewhere, `__pycache__`, `node_modules`, `venv`, `build`, `dist`, `target`, `site-packages` and `*.egg-info` are skipped. Hidden files and directories and the spec's own lock and claims files are always ignored. Files whose size and modification time haven't changed reuse their earlier hash, and the snapshot is taken after the spec lock is released, so claims stay fast on large projects.
+
+Tasks without `[touch: ...]`, and tasks marked done without ever being claimed (or claimed before snapshots existed), are not checked. The snapshot is removed when the task is completed or released. Add `*.aspec.claims/` to your `.gitignore`.
+
+## Claim Leases
+
+An agent that crashes, is stopped, or runs out of turns would otherwise hold its task and file locks forever. Each claim therefore has a lease, recorded in `<spec>.claims/T<id>.lease`:
+
+- The lease is renewed whenever the owner runs `aspec next --as <owner>` (which returns its held task), `aspec test <file> -t T<id>`, or re-claims the task with `patch --set T<id>=in_progress@<owner>`.
+- When a lease is older than the lease length (`--lease`, else `@meta lease`, else 30 minutes), the next `aspec next`, or a `patch` claim of that task, returns it to TODO so it can be claimed again. `next` reports which claims it released.
+- An agent that comes back after its claim expired is stopped from completing the task over the new owner: `next` instructs agents to finish with `--set T<id>=done@<owner>`, which is rejected unless they still hold the claim.
+- Claims made before leases existed (no lease file) never expire.
+
+The next owner keeps whatever changes the previous owner left in the task's files, and its scope snapshot starts from that state.
 
 ## Concurrency Model
 
@@ -205,11 +223,10 @@ Several agents can safely run `aspec patch` and `aspec next` against the same sp
 1. Each patch or claim takes an exclusive lock on a sidecar file, `<spec>.lock` (add `*.aspec.lock` to `.gitignore`).
 2. Under the lock, the spec is re-read, so the patch applies to the latest state rather than a stale copy.
 3. The new spec is written to a temporary file and atomically renamed into place, so readers never see a half-written file.
-4. `--verify` scope checks and test gates run **before** the lock is taken, so a slow test suite doesn't block other agents.
+4. Scope checks and `--verify` test gates run **before** the lock is taken, and scope snapshots after it is released, so a slow test suite or a large project doesn't block other agents.
+5. The new spec is written by editing the changed lines in place, so `#` comments, blank lines and the order and formatting of untouched entries are preserved. New tasks go after the last task and new rationale and rules after the last one.
 
 Combined with the claim guards, this means that when several agents race for the same task, exactly one gets it: the others get a clear rejection from `patch`, or a different task from `next`.
-
-> **Note:** `patch` re-serializes the spec in canonical order, so `#` comments and custom section ordering are not preserved.
 
 ---
 
@@ -221,9 +238,9 @@ Combined with the claim guards, this means that when several agents race for the
 | :--- | :--- |
 | `aspec_next` | Claim the next ready task for an `owner` (or return the one it holds), optionally waiting, and return its scoped prompt |
 | `aspec_pack` | Subagent slice for a task |
-| `aspec_patch` | Apply mutations (e.g. `T2=in_progress@agent-a`, `T2=done`, `+task T5: ...`), optional `verify` (scope check and test gate). Rejected patches are returned as `Patch rejected: <reason>` |
+| `aspec_patch` | Apply mutations (e.g. `T2=in_progress@agent-a`, `T2=done@agent-a`, `+task T5: ...`), optional `verify` (test gate; the scope check always runs). Rejected patches are returned as `Patch rejected: <reason>` |
 | `aspec_ready` | Ready tasks, owners, lock waits and parallel batches as JSON |
-| `aspec_verify` | Run a task's `[test: ...]` gate |
+| `aspec_verify` | Run a task's `[test: ...]` gate (renews its lease) |
 | `aspec_lint` | Lint report |
 | `aspec_render` | Markdown + Mermaid rendering |
 
@@ -254,9 +271,9 @@ result = claim_next(Path("project.aspec"), "agent-b", wait=True, timeout=60)
 print(result.status, result.task.id if result.task else None)  # e.g. "claimed T3"
 
 try:
-    patch_file(Path("project.aspec"), ["T3=done"], verify=True)
+    patch_file(Path("project.aspec"), ["T3=done@agent-b"], verify=True)
 except PatchError as e:
-    print("not done yet:", e)  # out-of-scope changes or a failing test gate
+    print("not done yet:", e)  # out-of-scope changes, a failing test gate or an expired claim
 
 print(format_subagent_prompt(doc, "T3"))
 ```
@@ -265,7 +282,7 @@ print(format_subagent_prompt(doc, "T3"))
 
 ## Agent Workflow
 
-Agents working in a repository managed by agentspec follow the loop in [AGENTS.md](AGENTS.md): get a task (`next --as <agent>`), modify only its `[touch: ...]` files, run its gate (`test`), then mark it done (`patch --set T<id>=done --verify`), and repeat until `next` reports that all tasks are done. Orchestrators delegate with `aspec pack` instead of passing full plans to subagents.
+Agents working in a repository managed by agentspec follow the loop in [AGENTS.md](AGENTS.md): get a task (`next --as <agent>`), modify only its `[touch: ...]` files, run its gate (`test`), then mark it done (`patch --set T<id>=done@<agent> --verify`), and repeat until `next` reports that all tasks are done. Orchestrators delegate with `aspec pack` instead of passing full plans to subagents.
 
 ---
 

@@ -10,7 +10,7 @@ from .parser import parse_spec, ParseError
 from .transpiler import to_markdown
 from .benchmark import benchmark_spec, count_tokens
 from .packer import pack_for_task, format_subagent_prompt, format_next_message
-from .patcher import patch_file, claim_next, PatchError
+from .patcher import patch_file, claim_next, renew_task_lease, PatchError
 from .linter import lint_spec
 from .ingester import ingest_codebase
 from .dashboard import generate_html_dashboard
@@ -191,7 +191,7 @@ def cmd_patch(args):
 
     try:
         verify = getattr(args, "verify", False)
-        patch_file(filepath, mutations, verify=verify)
+        patch_file(filepath, mutations, verify=verify, lease_seconds=args.lease)
         console.print(f"[bold green]✔ Successfully patched '{filepath}':[/bold green]")
         for m in mutations:
             console.print(f"  • Applied: [cyan]{escape(m)}[/cyan]")
@@ -206,7 +206,7 @@ def cmd_next(args):
         sys.exit(1)
 
     try:
-        result = claim_next(filepath, args.as_, wait=args.wait, timeout=args.timeout)
+        result = claim_next(filepath, args.as_, wait=args.wait, timeout=args.timeout, lease_seconds=args.lease)
     except PatchError as pe:
         console.print(f"[bold red]Next Error:[/bold red] {escape(str(pe))}")
         sys.exit(1)
@@ -216,6 +216,7 @@ def cmd_next(args):
         task = result.task
         print(json.dumps({
             "status": result.status,
+            "released_expired": result.released,
             "task": None if task is None else {
                 "id": task.id, "title": task.title, "owner": task.owner, "touches": task.touches,
                 "refs": task.refs, "test": task.test_cmd, "after": task.dependencies,
@@ -441,6 +442,7 @@ def cmd_test(args):
                 console.print(f"[bold red]Error:[/bold red] Task '{args.task}' not found in spec.")
                 sys.exit(1)
             target_tasks.append(task_map[args.task])
+            renew_task_lease(filepath, args.task)  # running the gate shows the owner is still working
         else:
             target_tasks = [t for t in doc.tasks if t.test_cmd]
 
@@ -502,7 +504,8 @@ def main():
     p_patch = subparsers.add_parser("patch", help="Apply in-place mutations to a spec file")
     p_patch.add_argument("file", help="Path to .aspec file")
     p_patch.add_argument("--set", "-s", action="append", help="Set task status (e.g. T2=done)")
-    p_patch.add_argument("--verify", action="store_true", help="Before marking a task done, check it only changed its [touch: ...] files and run its [test: ...] gate")
+    p_patch.add_argument("--verify", action="store_true", help="Before marking a task done, also run its [test: ...] gate (the [touch: ...] scope is always checked)")
+    p_patch.add_argument("--lease", type=float, default=None, metavar="SECONDS", help="Claim lease length; claims not renewed within it can be taken over (default: @meta lease, else 1800)")
     p_patch.add_argument("--add-task", action="append", help="Add new task (e.g. 'T7: title [after: T6]')")
     p_patch.add_argument("--add-why", action="append", help="Add rationale (e.g. 'key: reason')")
     p_patch.add_argument("--add-rule", action="append", help="Add rule (e.g. 'key: constraint')")
@@ -514,6 +517,7 @@ def main():
     p_next.add_argument("--wait", action="store_true", help="Keep polling until a task is ready or all tasks are done")
     p_next.add_argument("--timeout", type=float, default=90.0, help="Seconds to wait with --wait (default 90)")
     p_next.add_argument("--json", action="store_true", help="Output JSON for orchestrator agents")
+    p_next.add_argument("--lease", type=float, default=None, metavar="SECONDS", help="Claim lease length; claims not renewed within it are released (default: @meta lease, else 1800)")
 
     p_ready = subparsers.add_parser("ready", help="List unblocked tasks and conflict-free parallel swarm batches")
     p_ready.add_argument("file", help="Path to .aspec file")

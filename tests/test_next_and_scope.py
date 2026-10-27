@@ -96,7 +96,7 @@ def test_concurrent_next_never_double_claims(project: Path):
 def test_mcp_next(project: Path):
     out = handle_tool_call("aspec_next", {"file_path": str(project), "owner": "agent-a"})
     assert out.startswith("Claimed T2 for agent-a.")
-    assert "aspec patch" in out and "--set T2=done --verify" in out
+    assert "aspec patch" in out and "--set T2=done@agent-a --verify" in out
 
 # --- scope check on done --verify -------------------------------------------
 
@@ -137,8 +137,15 @@ def test_done_allows_files_of_tasks_others_worked_on(project: Path):
     patch_file(project, ["T2=done"], verify=True)
     assert status(project, "T2")[0] == TaskStatus.DONE
 
-def test_scope_not_checked_without_verify_or_snapshot(project: Path):
-    # Claimed by an older agentspec (no snapshot) or completed without --verify
+def test_done_without_verify_still_checks_scope(project: Path):
+    claim_next(project, "agent-a")
+    (project.parent / "src" / "shared.py").write_text("# hacked\n")
+    with pytest.raises(PatchError, match="src/shared.py"):
+        patch_file(project, ["T2=done"])
+    assert status(project, "T2")[0] == TaskStatus.IN_PROGRESS
+
+def test_scope_not_checked_without_snapshot(project: Path):
+    # Claimed by an older agentspec, which took no snapshot
     patch_file(project, ["T2=in_progress@agent-a"])
     snapshot_path(project, "T2").unlink()
     (project.parent / "src" / "shared.py").write_text("# changed\n")

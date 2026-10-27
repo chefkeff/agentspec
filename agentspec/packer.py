@@ -139,11 +139,14 @@ def format_next_message(result, spec_name: str) -> str:
                 f"or file locks). Run the same command again to keep waiting.")
     task = result.task
     verb = "Claimed" if result.status == "claimed" else "You already hold"
-    return "\n".join([
+    released = (f"Released expired claim(s) on {', '.join(result.released)}.\n\n"
+                if getattr(result, "released", None) else "")
+    return released + "\n".join([
         f"{verb} {task.id} for {task.owner}.",
         "",
         format_subagent_prompt(result.doc, task.id),
         "",
         f"Edit only: {', '.join(task.touches) if task.touches else '(no [touch: ...] declared)'}",
-        f"When it is finished: aspec patch {spec_name} --set {task.id}=done --verify",
+        f"Your claim is a lease: running aspec next --as {task.owner} or aspec test {spec_name} -t {task.id} renews it.",
+        f"When it is finished: aspec patch {spec_name} --set {task.id}=done@{task.owner} --verify",
     ])

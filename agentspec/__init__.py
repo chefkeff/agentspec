@@ -8,13 +8,13 @@ from .parser import parse_spec, ParseError
 from .transpiler import to_markdown
 from .benchmark import benchmark_spec, count_tokens
 from .packer import pack_for_task, format_subagent_prompt
-from .patcher import apply_mutations, patch_file, claim_next, NextResult, PatchError
+from .patcher import apply_mutations, patch_file, claim_next, renew_task_lease, NextResult, PatchError
 from .linter import lint_spec, LintIssue
 from .ingester import ingest_codebase
 from .dashboard import generate_html_dashboard
 from .scheduler import get_task_schedule, TaskSchedule, ParallelBatch
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "SpecDoc",
@@ -34,6 +34,7 @@ __all__ = [
     "apply_mutations",
     "patch_file",
     "claim_next",
+    "renew_task_lease",
     "NextResult",
     "PatchError",
     "lint_spec",
