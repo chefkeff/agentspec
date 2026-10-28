@@ -13,7 +13,7 @@ Instead of having LLM agents exchange verbose Markdown files that bloat context 
 - serializes concurrent edits to the spec, so simultaneous agents never lose each other's updates,
 - guards completion with test verification gates.
 
-In an [A/B evaluation](eval/README.md) against agents coordinating through a shared Markdown checklist, agentspec produced the same results at lower cost: about 19% less with 3 agents on a 7-task project, and about 54% less (and 20% faster) with 6 agents on a 13-task project. When half the agents were silently stopped mid-task, agentspec's claim leases handed their tasks to new agents at 46% lower cost, while checklist agents recovered only by overriding each other's claims.
+In an [A/B evaluation](eval/README.md) against agents coordinating through a shared Markdown checklist, agentspec produced the same results at lower cost: about 19% less with 3 agents on a 7-task project, and about 54% less (and 20% faster) with 6 agents on a 13-task project. When half the agents were silently stopped mid-task, agentspec's claim leases handed their tasks to new agents at about 60% lower cost, while checklist agents recovered only by overriding each other's claims.
 
 ---
 

@@ -88,6 +88,25 @@ What happened:
 - **agentspec cost 46% less** ($2.50 vs $4.61 per run) **but was slower** (621 s vs 513 s). Its second wave has to wait for leases to run out (up to 3 minutes), while checklist agents took stuck tasks over as soon as they suspected them.
 - **Run agentspec-3 cost $3.55** because one agent (agent-10) called `aspec next` without `--wait` 110 times in a tight loop while waiting for leases, against 1–8 calls for every other agent. `next` said "run the same command again" when no task was ready, which did not tell an agent how long to wait. It now reports how long until the earliest claim's lease runs out and, when called without `--wait`, tells the agent to use it instead of polling.
 
+**Rerun after the fix (2026-10-28, agentspec only, 3 runs).** With the waiting hint in place, the agentspec condition was rerun alone (`--conditions agentspec`, label `xl-restart-silent-v2`). The checklist column below is the unchanged condition from the batch above.
+
+| Metric | agentspec | checklist |
+| :--- | ---: | ---: |
+| Runs | 3 | 3 |
+| All 13 tasks pass (runs) | 3/3 | 3/3 |
+| Hidden tests passed, mean (range) | 59.0/59 (59–59) | 59.0/59 (59–59) |
+| Tasks marked done but failing (total) | 0 | 0 |
+| Tasks left in progress or todo at end (total) | 0 | 0 |
+| Cost per run, USD, mean (range) | 1.76 (1.60–1.86) | 4.61 (4.29–5.04) |
+| Wall-clock per run, s, mean (range) | 630 (544–747) | 513 (476–566) |
+| Agent turns per run, mean (range) | 148 (136–160) | 287 (279–300) |
+| Expired claims released by lease (total) | 13 | 0 |
+| Test files edited (runs) | 0/3 | 0/3 |
+| Permission denials (total) | 0 | 0 |
+| Timed-out or errored agents (total) | 0 | 0 |
+
+Every `aspec next` call in the rerun used `--wait`: at most 6 calls per agent, against 110 calls without `--wait` from one agent before the fix. Cost per run was $1.60–1.86, 62% less than the checklist. Wall-clock time didn't change (630 s, against 621 s before and 513 s for the checklist): the second wave still waits up to 3 minutes for leases to run out. With 3 runs, and the loop having happened once in 3 runs before, this shows the loop didn't recur, not that it can't.
+
 The first attempt at run 3 of both conditions was discarded: the machine went to sleep mid-run, cutting off the second wave (both runs reported 6,864 s and 47,777 s of wall-clock time against an 1,800 s cap). The harness now marks a run invalid if it overruns its cap by more than 5 minutes, and the replacement runs were made under `caffeinate -i` with `--first-run 3`.
 
 ## Running
@@ -104,6 +123,6 @@ caffeinate -i eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 
 
 `--restart-turns N` cuts a first wave of agents off after N turns each, which leaves tasks half-claimed and files half-written, then starts a fresh wave that is told the earlier agents were stopped. With `--restart-silent` the fresh wave is not told. `--lease S` adds a claim lease of S seconds to the agentspec spec's `@meta`.
 
-Options: `--project` (default `shop`), `--agents` (default 3), `--model` (default `sonnet`), `--budget` per agent in USD (default 4), `--timeout` per run in seconds (default 1800), `--parallel-runs` (default 2), `--first-run` (index of the first run, to redo or extend a series). On a laptop, run under `caffeinate -i` so the machine doesn't sleep mid-run.
+Options: `--project` (default `shop`), `--agents` (default 3), `--model` (default `sonnet`), `--budget` per agent in USD (default 4), `--timeout` per run in seconds (default 1800), `--parallel-runs` (default 2), `--first-run` (index of the first run, to redo or extend a series), `--conditions` (run only some conditions, e.g. `--conditions agentspec`). On a laptop, run under `caffeinate -i` so the machine doesn't sleep mid-run.
 
 Agents run with `claude -p` in `dontAsk` permission mode and may only use Read, Edit, Write, Glob, Grep and `python3`, `aspec`, `sleep`, `ls` and `cat` in Bash. Run directories and agent logs go to `$TMPDIR/agentspec-eval-runs/` by default (`--workdir`, which must be outside any git repository); per-run results and a summary table go to `eval/results/`. A run is discarded, and the batch stops, if any agent hits an API error such as a usage limit or touches files in this repository.

@@ -382,6 +382,8 @@ def main():
                     help="with --restart-turns, do not tell the second wave that the first was stopped")
     ap.add_argument("--lease", type=float, default=None,
                     help="claim lease in seconds for the agentspec condition (added to the spec's @meta)")
+    ap.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(CONDITIONS),
+                    help="which conditions to run (default: both)")
     ap.add_argument("--first-run", type=int, default=1, help="index of the first run (to redo or extend a series)")
     ap.add_argument("--parallel-runs", type=int, default=2)
     ap.add_argument("--label", default="pilot")
@@ -400,7 +402,7 @@ def main():
                  "use a directory outside any repository.")
     project = Project.load(args.project)
 
-    jobs = [(c, i) for i in range(args.first_run, args.first_run + args.runs) for c in CONDITIONS]
+    jobs = [(c, i) for i in range(args.first_run, args.first_run + args.runs) for c in args.conditions]
     with ThreadPoolExecutor(max_workers=args.parallel_runs) as pool:
         results = [r for r in pool.map(lambda job: do_run(job[0], job[1], project, args), jobs) if r]
     if not results:
