@@ -217,6 +217,7 @@ def cmd_next(args):
         print(json.dumps({
             "status": result.status,
             "released_expired": result.released,
+            "next_release_in": None if result.next_release_in is None else round(result.next_release_in, 1),
             "task": None if task is None else {
                 "id": task.id, "title": task.title, "owner": task.owner, "touches": task.touches,
                 "refs": task.refs, "test": task.test_cmd, "after": task.dependencies,

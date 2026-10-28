@@ -128,6 +128,12 @@ def format_subagent_prompt(doc: SpecDoc, target_id: str, prune_contracts: bool =
     ]
     return "\n".join(prompt)
 
+def _duration(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 90:
+        return f"{seconds}s"
+    return f"{seconds // 60}m {seconds % 60:02d}s"
+
 def format_next_message(result, spec_name: str) -> str:
     """Human/agent-readable outcome of `aspec next` (a patcher.NextResult)."""
     if result.status == "all_done":
@@ -135,8 +141,19 @@ def format_next_message(result, spec_name: str) -> str:
     if result.status == "none_ready":
         in_progress = sum(t.status == TaskStatus.IN_PROGRESS for t in result.doc.tasks)
         todo = sum(t.status == TaskStatus.TODO for t in result.doc.tasks)
-        return (f"No task is ready for you yet ({in_progress} in progress, {todo} waiting on prerequisites "
-                f"or file locks). Run the same command again to keep waiting.")
+        lines = [f"No task is ready for you yet ({in_progress} in progress, {todo} waiting on prerequisites "
+                 f"or file locks)."]
+        release_in = getattr(result, "next_release_in", None)
+        if release_in is not None:
+            lines.append(f"The earliest claim can be released in about {_duration(release_in)} "
+                         "if its owner does not renew it; finished tasks may free others sooner.")
+        if getattr(result, "waited", False):
+            lines.append("Run the same command again to keep waiting.")
+        else:
+            owner = getattr(result, "owner", None) or "<your-name>"
+            lines.append(f"Wait with `aspec next {spec_name} --as {owner} --wait` instead of re-running "
+                         "this command in a loop: it blocks until a task is ready.")
+        return " ".join(lines)
     task = result.task
     verb = "Claimed" if result.status == "claimed" else "You already hold"
     released = (f"Released expired claim(s) on {', '.join(result.released)}.\n\n"

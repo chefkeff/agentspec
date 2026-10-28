@@ -61,6 +61,35 @@ The first shop-xl pilots were discarded. Their run directories were inside this 
 
 > **Protocol versions:** the shop results used the earlier agentspec protocol (`ready`, then claim with `patch`, then `pack`). The shop-xl results and [protocols/agentspec.md](protocols/agentspec.md) use `aspec next --wait`, which claims and returns the next task in one call, with `--verify` also checking file scope.
 
+## Results: shop-xl silent restart (2026-10-28, 3 runs per condition, 6 + 6 Sonnet agents, claim leases)
+
+This scenario tests agentspec 0.4's claim leases. A first wave of 6 agents is cut off after 12 turns each, which leaves tasks claimed and files half-written. A second wave of 6 agents then starts **without being told** that anyone was stopped. In the agentspec condition, abandoned claims can only come back through leases, set to 180 seconds for this eval (`--lease 180`; the default is 30 minutes). In the checklist condition, nothing releases a `[~]` claim unless an agent decides to.
+
+| Metric | agentspec | checklist |
+| :--- | ---: | ---: |
+| Runs | 3 | 3 |
+| All 13 tasks pass (runs) | 3/3 | 3/3 |
+| Hidden tests passed, mean (range) | 59.0/59 (59–59) | 59.0/59 (59–59) |
+| Tasks marked done but failing (total) | 0 | 0 |
+| Tasks left in progress or todo at end (total) | 0 | 0 |
+| Cost per run, USD, mean (range) | 2.50 (1.96–3.55) | 4.61 (4.29–5.04) |
+| Wall-clock per run, s, mean (range) | 621 (346–942) | 513 (476–566) |
+| Agent turns per run, mean (range) | 183 (129–269) | 287 (279–300) |
+| Expired claims released by lease (total) | 10 | 0 |
+| Test files edited (runs) | 0/3 | 0/3 |
+| Permission denials (total) | 1 | 0 |
+| Timed-out or errored agents (total) | 0 | 0 |
+
+What happened:
+
+- **Both conditions recovered every abandoned task**, and every run passed all 59 hidden tests.
+- **agentspec did it within its protocol.** `next` released 10 expired claims across the 3 runs and handed those tasks to second-wave agents. No `done@owner` patch was rejected and no scope check fired.
+- **The checklist agents recovered by breaking their protocol.** Second-wave agents noticed that tasks had been `[~]` for a long time, ran their tests, and then marked other agents' tasks done or claimed tasks whose prerequisites were still `[~]` ("T2, T3, T4 are stuck but their tests all pass ... I'll claim T5"). It worked here because the abandoned code happened to pass. Nothing would have stopped them marking half-finished work as done.
+- **agentspec cost 46% less** ($2.50 vs $4.61 per run) **but was slower** (621 s vs 513 s). Its second wave has to wait for leases to run out (up to 3 minutes), while checklist agents took stuck tasks over as soon as they suspected them.
+- **Run agentspec-3 cost $3.55** because one agent (agent-10) called `aspec next` without `--wait` 110 times in a tight loop while waiting for leases, against 1–8 calls for every other agent. `next` said "run the same command again" when no task was ready, which did not tell an agent how long to wait. It now reports how long until the earliest claim's lease runs out and, when called without `--wait`, tells the agent to use it instead of polling.
+
+The first attempt at run 3 of both conditions was discarded: the machine went to sleep mid-run, cutting off the second wave (both runs reported 6,864 s and 47,777 s of wall-clock time against an 1,800 s cap). The harness now marks a run invalid if it overruns its cap by more than 5 minutes, and the replacement runs were made under `caffeinate -i` with `--first-run 3`.
+
 ## Running
 
 ```bash
@@ -69,10 +98,12 @@ eval/.venv/bin/pip install -e . pytest
 eval/.venv/bin/python eval/run_ab.py --runs 5 --label full
 eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 --runs 4 --label xl
 eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 --runs 4 --restart-turns 12 --label xl-restart
+caffeinate -i eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 --runs 3 --restart-turns 12 \
+    --restart-silent --lease 180 --label xl-restart-silent
 ```
 
-`--restart-turns N` cuts a first wave of agents off after N turns each, which leaves tasks half-claimed and files half-written, then starts a fresh wave that is told the earlier agents were stopped.
+`--restart-turns N` cuts a first wave of agents off after N turns each, which leaves tasks half-claimed and files half-written, then starts a fresh wave that is told the earlier agents were stopped. With `--restart-silent` the fresh wave is not told. `--lease S` adds a claim lease of S seconds to the agentspec spec's `@meta`.
 
-Options: `--project` (default `shop`), `--agents` (default 3), `--model` (default `sonnet`), `--budget` per agent in USD (default 4), `--timeout` per run in seconds (default 1800), `--parallel-runs` (default 2).
+Options: `--project` (default `shop`), `--agents` (default 3), `--model` (default `sonnet`), `--budget` per agent in USD (default 4), `--timeout` per run in seconds (default 1800), `--parallel-runs` (default 2), `--first-run` (index of the first run, to redo or extend a series). On a laptop, run under `caffeinate -i` so the machine doesn't sleep mid-run.
 
 Agents run with `claude -p` in `dontAsk` permission mode and may only use Read, Edit, Write, Glob, Grep and `python3`, `aspec`, `sleep`, `ls` and `cat` in Bash. Run directories and agent logs go to `$TMPDIR/agentspec-eval-runs/` by default (`--workdir`, which must be outside any git repository); per-run results and a summary table go to `eval/results/`. A run is discarded, and the batch stops, if any agent hits an API error such as a usage limit or touches files in this repository.

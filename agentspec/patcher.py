@@ -286,6 +286,14 @@ def _release_expired(filepath: Path, doc: SpecDoc, lease_seconds: float) -> List
         released.append(task.id)
     return released
 
+def _next_release_in(filepath: Path, doc: SpecDoc, lease_seconds: float) -> Optional[float]:
+    """Seconds until the earliest lease among in-progress tasks runs out, if any has one."""
+    renewed = [scope.lease_renewed_at(filepath, t.id) for t in doc.tasks if t.status == TaskStatus.IN_PROGRESS]
+    renewed = [r for r in renewed if r is not None]
+    if not renewed:
+        return None
+    return max(0.0, min(renewed) + lease_seconds - time.time())
+
 def _status_mutations(mutations: List[str]) -> List[Tuple[str, TaskStatus, Optional[str]]]:
     return [_parse_status_mutation(m.strip()) for m in mutations
             if "=" in m and not m.strip().startswith("+")]
@@ -344,6 +352,11 @@ class NextResult:
     task: Optional[TaskDef]
     doc: SpecDoc
     released: List[str] = field(default_factory=list)  # expired claims returned to TODO
+    owner: Optional[str] = None
+    waited: bool = False
+    # When nothing is ready: seconds until the earliest in-progress claim's lease runs out
+    # (None if no in-progress task has a lease).
+    next_release_in: Optional[float] = None
 
 def claim_next(filepath: Path, owner: str, wait: bool = False, timeout: float = 90.0,
                poll_interval: float = 3.0, lease_seconds: Optional[float] = None) -> NextResult:
@@ -367,11 +380,11 @@ def claim_next(filepath: Path, owner: str, wait: bool = False, timeout: float = 
             held = next((t for t in doc.tasks if t.status == TaskStatus.IN_PROGRESS and t.owner == owner), None)
             if held:
                 scope.renew_lease(filepath, held.id, owner)
-                return NextResult("resumed", held, doc, released)
+                return NextResult("resumed", held, doc, released, owner, wait)
             newly = _release_expired(filepath, doc, lease_seconds_for(doc, lease_seconds))
             released += newly
             if all(t.status == TaskStatus.DONE for t in doc.tasks):
-                return NextResult("all_done", None, doc, released)
+                return NextResult("all_done", None, doc, released, owner, wait)
             schedule = get_task_schedule(doc)
             if schedule.ready_tasks:
                 mutation = f"{schedule.ready_tasks[0].id}=in_progress@{owner}"
@@ -379,13 +392,15 @@ def claim_next(filepath: Path, owner: str, wait: bool = False, timeout: float = 
                 _atomic_write(filepath, render_patched(original, before, updated))
                 needs_snapshot = _record_claims(filepath, updated, [mutation])
                 claimed = next(t for t in updated.tasks if t.id == schedule.ready_tasks[0].id)
-            elif newly:
-                _atomic_write(filepath, render_patched(original, before, doc))
+            else:
+                if newly:
+                    _atomic_write(filepath, render_patched(original, before, doc))
+                next_release_in = _next_release_in(filepath, doc, lease_seconds_for(doc, lease_seconds))
         if schedule.ready_tasks:
             _take_snapshots(filepath, updated, needs_snapshot)
-            return NextResult("claimed", claimed, updated, released)
+            return NextResult("claimed", claimed, updated, released, owner, wait)
         if not wait or time.monotonic() >= deadline:
-            return NextResult("none_ready", None, doc, released)
+            return NextResult("none_ready", None, doc, released, owner, wait, next_release_in)
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 def renew_task_lease(filepath: Path, task_id: str) -> bool:

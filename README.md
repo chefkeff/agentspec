@@ -13,7 +13,7 @@ Instead of having LLM agents exchange verbose Markdown files that bloat context 
 - serializes concurrent edits to the spec, so simultaneous agents never lose each other's updates,
 - guards completion with test verification gates.
 
-In an [A/B evaluation](eval/README.md) against agents coordinating through a shared Markdown checklist, agentspec produced the same results at lower cost: about 19% less with 3 agents on a 7-task project, and about 54% less (and 20% faster) with 6 agents on a 13-task project.
+In an [A/B evaluation](eval/README.md) against agents coordinating through a shared Markdown checklist, agentspec produced the same results at lower cost: about 19% less with 3 agents on a 7-task project, and about 54% less (and 20% faster) with 6 agents on a 13-task project. When half the agents were silently stopped mid-task, agentspec's claim leases handed their tasks to new agents at 46% lower cost, while checklist agents recovered only by overriding each other's claims.
 
 ---
 
@@ -105,6 +105,7 @@ aspec next project.aspec --as agent-3 --json                # structured output
 
 - If the agent already holds an in-progress task, `next` returns that task again instead of claiming a second one, and renews its lease.
 - Claims whose lease has run out are released first, so their tasks can be claimed again.
+- When nothing is ready, `next` says how long until the earliest claim's lease runs out, and, if `--wait` wasn't used, tells the agent to wait with it instead of polling (`next_release_in` in `--json` output).
 - Tasks whose files are locked by another in-progress task are skipped.
 - Outcomes: *claimed*, *resumed*, *all done*, or *none ready* (with `--wait`, it keeps polling until one of the others happens or the timeout passes; keep the timeout under your agent's shell-command limit).
 

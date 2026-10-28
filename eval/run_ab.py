@@ -8,7 +8,13 @@ checklist. Each run is graded by hidden acceptance tests the agents never see.
     eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 --restart-turns 12 --label xl-restart
 
 With --restart-turns, a first wave of agents is cut off after that many turns
-each (leaving work half-claimed), then a fresh wave of agents takes over.
+each (leaving work half-claimed), then a fresh wave of agents takes over. The
+fresh wave is told the first was stopped, unless --restart-silent is given; then
+abandoned claims are only recovered through agentspec's claim leases (set short
+with --lease) or by the agents noticing on their own.
+
+    eval/.venv/bin/python eval/run_ab.py --project shop-xl --agents 6 --restart-turns 12 \
+        --restart-silent --lease 180 --label xl-restart-silent
 """
 import argparse
 import json
@@ -78,11 +84,14 @@ class Project:
         return cls(name, pdir, spec_text, work, hidden)
 
 
-def setup_run(run_dir: Path, condition: str, project: Project) -> None:
+def setup_run(run_dir: Path, condition: str, project: Project, lease: float = None) -> None:
     shutil.copytree(project.dir / "project", run_dir)
     shutil.copy(EVAL_DIR / "protocols" / f"{condition}.md", run_dir / "PROTOCOL.md")
     if condition == "agentspec":
-        (run_dir / "project.aspec").write_text(project.spec_text, encoding="utf-8")
+        spec_text = project.spec_text
+        if lease:
+            spec_text = re.sub(r"^(@meta .*)$", rf'\1 | lease: "{lease:g}s"', spec_text, count=1, flags=re.M)
+        (run_dir / "project.aspec").write_text(spec_text, encoding="utf-8")
     else:
         doc = parse_spec(project.spec_text)
         (run_dir / "PLAN.md").write_text(to_markdown(doc), encoding="utf-8")
@@ -137,13 +146,15 @@ def _touches_repo(tool_input: str, run_dir: Path) -> bool:
 def parse_agent_log(path: Path, run_dir: Path) -> dict:
     stats = {"cost_usd": 0.0, "turns": 0, "is_error": None, "subtype": None, "edited_files": [],
              "denials": 0, "result": None, "input_tokens": 0, "output_tokens": 0, "api_error": None,
-             "repo_access": []}
+             "repo_access": [], "lease_releases": 0}
     edited = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if ev.get("type") == "user" and "Released expired claim" in line:
+            stats["lease_releases"] += 1
         if ev.get("type") == "assistant":
             for block in ev.get("message", {}).get("content", []):
                 if block.get("type") == "tool_use" and _touches_repo(json.dumps(block.get("input", {})), run_dir):
@@ -245,6 +256,9 @@ def score_run(run_dir: Path, condition: str, project: Project, launch: dict) -> 
         "project": project.name,
         "run": run_dir.name,
         "restart": bool(stopped_on_purpose),
+        "restart_silent": launch.get("silent", False),
+        "lease_seconds": launch.get("lease"),
+        "lease_releases": sum(a["lease_releases"] for a in agents.values()),
         # An API error (usage limit, overload) means agents were cut off by the
         # platform rather than by the task, so the run says nothing about either condition.
         "invalid": sorted({f"API error {a['api_error']}" for a in agents.values() if a["api_error"]}
@@ -287,25 +301,31 @@ def do_run(condition: str, index: int, project: Project, args) -> dict:
         shutil.rmtree(run_dir)
     for old in args.workdir.glob(f"{run_dir.name}.*"):
         old.unlink()
-    setup_run(run_dir, condition, project)
+    setup_run(run_dir, condition, project, lease=args.lease)
     print(f"[start] {run_dir.name}", flush=True)
 
     n = args.agents
     start = time.time()
     deadline = start + args.timeout
-    launch = {"timed_out": []}
+    launch = {"timed_out": [], "silent": bool(args.restart_turns and args.restart_silent),
+              "lease": args.lease if condition == "agentspec" else None}
     if args.restart_turns:
         first = [f"agent-{k}" for k in range(1, n + 1)]
         launch["timed_out"] += launch_wave(run_dir, first, n, args, deadline, max_turns=args.restart_turns)
         launch["first_wave"] = first
         second = [f"agent-{k}" for k in range(n + 1, 2 * n + 1)]
-        note = RESTART_NOTE.format(previous=f"agent-1 to agent-{n}")
+        note = "" if args.restart_silent else RESTART_NOTE.format(previous=f"agent-1 to agent-{n}")
         launch["timed_out"] += launch_wave(run_dir, second, n, args, deadline, note=note)
     else:
         launch["timed_out"] += launch_wave(run_dir, [f"agent-{k}" for k in range(1, n + 1)], n, args, deadline)
     launch["wall_seconds"] = round(time.time() - start, 1)
 
     result = score_run(run_dir, condition, project, launch)
+    if launch["wall_seconds"] > args.timeout + 300:
+        # The deadline is checked against wall-clock time, so this means the machine
+        # slept (or the harness stalled) and agents were cut off for reasons unrelated to the task.
+        result["invalid"].append(f"run took {launch['wall_seconds']:.0f}s, far over the {args.timeout}s cap "
+                                 "(machine asleep?)")
     if result["invalid"]:
         STOP.set()
         print(f"[invalid] {run_dir.name}: {'; '.join(result['invalid'])}; not counted, stopping", flush=True)
@@ -338,6 +358,7 @@ def summarize(results: list) -> str:
         ("Cost per run, USD, mean (range)", lambda rs: f"{mean([r['cost_usd'] for r in rs]):.2f} ({rng([r['cost_usd'] for r in rs], '{:.2f}')})"),
         ("Wall-clock per run, s, mean (range)", lambda rs: f"{mean([r['wall_seconds'] for r in rs]):.0f} ({rng([r['wall_seconds'] for r in rs])})"),
         ("Agent turns per run, mean (range)", lambda rs: f"{mean([r['turns'] for r in rs]):.0f} ({rng([r['turns'] for r in rs])})"),
+        ("Expired claims released by lease (total)", lambda rs: f"{sum(r.get('lease_releases', 0) for r in rs)}"),
         ("Test files edited (runs)", lambda rs: f"{sum(bool(r['test_files_edited']) for r in rs)}/{len(rs)}"),
         ("Permission denials (total)", lambda rs: f"{sum(r['permission_denials'] for r in rs)}"),
         ("Timed-out or errored agents (total)", lambda rs: f"{sum(len(r['timed_out']) + len(r['agent_errors']) for r in rs)}"),
@@ -357,6 +378,11 @@ def main():
     ap.add_argument("--timeout", type=int, default=1800, help="seconds per run")
     ap.add_argument("--restart-turns", type=int, default=0,
                     help="stop a first wave of agents after this many turns each, then start a fresh wave")
+    ap.add_argument("--restart-silent", action="store_true",
+                    help="with --restart-turns, do not tell the second wave that the first was stopped")
+    ap.add_argument("--lease", type=float, default=None,
+                    help="claim lease in seconds for the agentspec condition (added to the spec's @meta)")
+    ap.add_argument("--first-run", type=int, default=1, help="index of the first run (to redo or extend a series)")
     ap.add_argument("--parallel-runs", type=int, default=2)
     ap.add_argument("--label", default="pilot")
     ap.add_argument("--workdir", type=Path, default=Path(tempfile.gettempdir()) / "agentspec-eval-runs",
@@ -374,7 +400,7 @@ def main():
                  "use a directory outside any repository.")
     project = Project.load(args.project)
 
-    jobs = [(c, i) for i in range(1, args.runs + 1) for c in CONDITIONS]
+    jobs = [(c, i) for i in range(args.first_run, args.first_run + args.runs) for c in CONDITIONS]
     with ThreadPoolExecutor(max_workers=args.parallel_runs) as pool:
         results = [r for r in pool.map(lambda job: do_run(job[0], job[1], project, args), jobs) if r]
     if not results:

@@ -1,3 +1,4 @@
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -189,3 +190,31 @@ def test_first_invariant_and_task_get_sections(tmp_path: Path):
     text = render_patched("@spec 0.1\n# just a comment\n", before, after)
     assert "# just a comment" in text
     assert parse_spec(text) == after
+
+# --- Waiting hints from next ------------------------------------------------
+
+from agentspec.packer import format_next_message
+
+def test_none_ready_reports_next_release_and_suggests_wait(project: Path):
+    claim_next(project, "agent-a")
+    claim_next(project, "agent-b")
+    expire(project, "T2", age=1700)  # 100s left on the default 1800s lease
+    res = claim_next(project, "agent-c")
+    assert res.status == "none_ready"
+    assert res.next_release_in == pytest.approx(100, abs=5)
+    msg = format_next_message(res, "project.aspec")
+    assert re.search(r"released in about 1m [34]\ds", msg)
+    assert "aspec next project.aspec --as agent-c --wait" in msg
+
+def test_none_ready_after_wait_says_run_again(project: Path):
+    claim_next(project, "agent-a")
+    claim_next(project, "agent-b")
+    res = claim_next(project, "agent-c", wait=True, timeout=0.1, poll_interval=0.05)
+    msg = format_next_message(res, "project.aspec")
+    assert "Run the same command again" in msg and "--wait` instead" not in msg
+
+def test_none_ready_without_leases_has_no_countdown(project: Path):
+    project.write_text(SPEC.replace("[ ] T2: auth", "[>] T2: auth").replace("[ ] T3: orders", "[>] T3: orders"))
+    res = claim_next(project, "agent-c")
+    assert res.status == "none_ready" and res.next_release_in is None
+    assert "released in" not in format_next_message(res, "project.aspec")
